@@ -2168,6 +2168,21 @@ async-function@^1.0.0:
   resolved "https://registry.yarnpkg.com/async-function/-/async-function-1.0.0.tgz#509c9fca60eaf85034c6829838188e4e4c8ffb2b"
   integrity sha512-hsU18Ae8CDTR6Kgu9DYf0EbCr/a5iGL0rytQDobUcdpYOKokk8LEjVphnXkDkgpi0wYVsqrXuP0bZxJaTqdgoA==
 
+athena-query-result-pager@^0.1.2:
+  version "0.1.2"
+  resolved "https://registry.yarnpkg.com/athena-query-result-pager/-/athena-query-result-pager-0.1.2.tgz#0fdcac760465b02d26deaa37b7fcf1b6e7217eaa"
+  integrity sha512-dQZgzMLTe9W4k1PnS4eB4N+XDzn6KtzAPMjEOzBsVEjuomTWlw4+raVVaV5vVKJgV09KadHWSC1886IejOVC2A==
+  dependencies:
+    "@aws-sdk/client-athena" "^3.983.0"
+    athena-query-result-parser "^0.1.5"
+
+athena-query-result-parser@^0.1.5:
+  version "0.1.5"
+  resolved "https://registry.yarnpkg.com/athena-query-result-parser/-/athena-query-result-parser-0.1.5.tgz#184e68b6765665d9847fc2a559a9384951b1b3cc"
+  integrity sha512-bdhBCPL+Pczb3E28D3jy1D0V2YvypgT4HBIFfWpKpavl5GuQoFzE/vjsJx+igu/F5xAL7JsdgKb0FjR2R2070w==
+  dependencies:
+    "@aws-sdk/client-athena" "^3.983.0"
+
 available-typed-arrays@^1.0.7:
   version "1.0.7"
   resolved "https://registry.yarnpkg.com/available-typed-arrays/-/available-typed-arrays-1.0.7.tgz#a5cc375d6a03c2efc87a553f3e0b1522def14846"
