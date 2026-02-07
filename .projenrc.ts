@@ -8,6 +8,7 @@ const project = new typescript.TypeScriptProject({
   typescriptVersion: '5.9.x',
   repository: 'https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector.git',
   releaseToNpm: true,
+  npmTrustedPublishing: true,
   npmAccess: javascript.NpmAccess.PUBLIC,
   minNodeVersion: '20.0.0',
   workflowNodeVersion: '24.x',
