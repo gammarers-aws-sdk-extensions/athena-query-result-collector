@@ -37,15 +37,20 @@ export class AthenaQueryResultCollector {
 
   private readonly pager: AthenaQueryResultPager;
   private readonly options: CollectorOptions;
+  private readonly retryCount: number;
+  private readonly retryDelayMs: number;
 
   constructor(client: AthenaClient, options: CollectorOptions = {}) {
+    const retryCount = this.normalizeNonNegativeInteger(options.retryCount, 0);
+    const retryDelayMs = this.normalizeNonNegativeInteger(options.retryDelayMs, 1000);
+
     this.pager = new AthenaQueryResultPager(client, options);
+    this.retryCount = retryCount;
+    this.retryDelayMs = retryDelayMs;
     this.options = {
-      maxRows: options.maxRows,
-      onPage: options.onPage,
-      retryCount: options.retryCount ?? 0,
-      retryDelayMs: options.retryDelayMs ?? 1000,
       ...options,
+      retryCount,
+      retryDelayMs,
     };
   }
 
@@ -166,16 +171,26 @@ export class AthenaQueryResultCollector {
     this.pager.reset();
 
     do {
+      if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
+        break;
+      }
+
       const page = await this.fetchPageWithRetry(
         queryExecutionId,
         rowParser,
         nextToken,
       );
 
-      await batchProcessor(page.rows, pageCount);
+      let rowsToProcess = page.rows;
+      if (this.options.maxRows !== undefined) {
+        const remaining = Math.max(this.options.maxRows - totalRows, 0);
+        rowsToProcess = page.rows.slice(0, remaining);
+      }
+
+      await batchProcessor(rowsToProcess, pageCount);
 
       pageCount++;
-      totalRows += page.rows.length;
+      totalRows += rowsToProcess.length;
 
       // maxRows check
       if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
@@ -198,18 +213,30 @@ export class AthenaQueryResultCollector {
   ): Promise<PageResult<T>> {
     let lastError: Error | undefined;
 
-    for (let attempt = 0; attempt <= this.options.retryCount!; attempt++) {
+    for (let attempt = 0; attempt <= this.retryCount; attempt++) {
       try {
         return await this.pager.fetchPageWith(queryExecutionId, rowParser, nextToken);
       } catch (error) {
         lastError = error as Error;
-        if (attempt < this.options.retryCount!) {
-          await this.sleep(this.options.retryDelayMs!);
+        if (attempt < this.retryCount) {
+          await this.sleep(this.retryDelayMs);
         }
       }
     }
 
-    throw lastError;
+    throw lastError ?? new Error('Failed to fetch page after retries');
+  }
+
+  private normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
+    if (value === undefined) {
+      return fallback;
+    }
+
+    if (!Number.isFinite(value) || Number.isNaN(value) || value < 0) {
+      return fallback;
+    }
+
+    return Math.floor(value);
   }
 
   private sleep(ms: number): Promise<void> {
