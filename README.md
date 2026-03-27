@@ -1,17 +1,34 @@
 # Athena Query Result Collector
 
-A TypeScript library that fetches AWS Athena query results via paging and supports bulk collection, streaming, and batch processing. It uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) under the hood.
+![npm](https://img.shields.io/npm/v/athena-query-result-collector)
+![license](https://img.shields.io/npm/l/athena-query-result-collector)
+![node](https://img.shields.io/node/v/athena-query-result-collector)
+
+A TypeScript library for collecting AWS Athena query results via pagination.  
+It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) internally.
+
+## Features
+
+- Collect all rows with `collect()` and metadata (`totalRows`, `pageCount`, `truncated`)
+- Transform rows with a custom parser using `collectWith()`
+- Stream rows lazily with `stream()` as an `AsyncGenerator`
+- Process rows per page using `processBatches()`
+- Limit output with `maxRows` (strictly enforced for collection, stream, and batch processing)
+- Retry page fetches with safe retry options (`retryCount`, `retryDelayMs`)
 
 ## Requirements
 
 - Node.js >= 20.0.0
-- Dependencies: `@aws-sdk/client-athena`, `athena-query-result-pager`
+- AWS Athena access configured for your runtime (credentials/region)
+- Peer usage dependency: `@aws-sdk/client-athena`
 
 ## Installation
 
 ```bash
 npm install athena-query-result-collector @aws-sdk/client-athena
-# or
+```
+
+```bash
 yarn add athena-query-result-collector @aws-sdk/client-athena
 ```
 
@@ -58,21 +75,22 @@ await collector.processBatches(
   'query-execution-id',
   (row) => row,
   async (rows, pageIndex) => {
+    console.log(`processing page ${pageIndex}, rows=${rows.length}`);
     await saveToDb(rows);
   }
 );
 ```
 
-### Options
+## Options
 
 `CollectorOptions` (extends `PagerOptions`):
 
-| Option        | Type     | Description |
-|---------------|----------|-------------|
-| `maxRows`     | number   | Maximum rows to collect (unlimited if omitted) |
-| `onPage`      | function | Callback per page (e.g. for progress) |
-| `retryCount`  | number   | Number of retries on error (default: 0) |
-| `retryDelayMs`| number   | Retry delay in ms (default: 1000) |
+| Option | Type | Description |
+| --- | --- | --- |
+| `maxRows` | `number` | Maximum number of rows to process (unlimited if omitted) |
+| `onPage` | `function` | Callback called after each fetched page in `collect()` / `collectWith()` |
+| `retryCount` | `number` | Retry count on page fetch failure (default: `0`; invalid/negative values are normalized) |
+| `retryDelayMs` | `number` | Delay in milliseconds between retries (default: `1000`; invalid/negative values are normalized) |
 
 You can also pass `PagerOptions` from `athena-query-result-pager` (e.g. page size).
 
@@ -82,4 +100,4 @@ The package re-exports `ParsedRow`, `RowParser`, `PageResult`, and `PagerOptions
 
 ## License
 
-This project is licensed under the Apache-2.0 License.
+This project is licensed under the (Apache-2.0) License.
