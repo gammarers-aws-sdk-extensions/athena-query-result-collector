@@ -179,8 +179,9 @@ describe('AthenaQueryResultCollector', () => {
 
       expect(batches).toHaveLength(2);
       expect(batches[0]).toHaveLength(2);
-      expect(batches[1]).toHaveLength(2);
-      expect(result.totalRows).toBe(4);
+      expect(batches[1]).toHaveLength(1);
+      expect(batches[1]).toEqual([{ a: 3 }]);
+      expect(result.totalRows).toBe(3);
       expect(result.pageCount).toBe(2);
     });
   });
@@ -312,6 +313,18 @@ describe('AthenaQueryResultCollector', () => {
 
       await expect(collector.collect(queryExecutionId)).rejects.toThrow('always fail');
       expect(mockFetchPageWith).toHaveBeenCalledTimes(3);
+    });
+
+    it('normalizes invalid retry options and never throws undefined', async () => {
+      mockFetchPageWith.mockRejectedValue(new Error('invalid retry options'));
+
+      const collector = new AthenaQueryResultCollector(mockClient, {
+        retryCount: -1,
+        retryDelayMs: Number.NaN,
+      });
+
+      await expect(collector.collect(queryExecutionId)).rejects.toThrow('invalid retry options');
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
   });
 });
