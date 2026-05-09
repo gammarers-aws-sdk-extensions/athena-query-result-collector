@@ -1,5 +1,6 @@
 # Athena Query Result Collector
 
+![build](https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector/actions/workflows/build.yml/badge.svg)
 ![npm](https://img.shields.io/npm/v/athena-query-result-collector)
 ![license](https://img.shields.io/npm/l/athena-query-result-collector)
 ![node](https://img.shields.io/node/v/athena-query-result-collector)
@@ -14,7 +15,8 @@ It supports full collection, streaming, and page-based batch processing, and it 
 - Stream rows lazily with `stream()` as an `AsyncGenerator`
 - Process rows per page using `processBatches()`
 - Limit output with `maxRows` (strictly enforced for collection, stream, and batch processing)
-- Retry page fetches with safe retry options (`retryCount`, `retryDelayMs`)
+- Retry transient page fetch failures only (throttling, 5xx, timeouts) with `retryCount` / `retryDelayMs` (permanent errors fail fast)
+- Support canceling long-running loops via `AbortSignal` (`CollectorOptions.signal`)
 
 ## Requirements
 
@@ -41,7 +43,11 @@ import { AthenaClient } from '@aws-sdk/client-athena';
 import { AthenaQueryResultCollector } from 'athena-query-result-collector';
 
 const client = new AthenaClient({ region: 'ap-northeast-1' });
-const collector = new AthenaQueryResultCollector(client);
+const collector = new AthenaQueryResultCollector(client, {
+  // Retries are applied only to transient failures (throttling, 5xx, timeouts, etc.)
+  retryCount: 3,
+  retryDelayMs: 1000,
+});
 
 const result = await collector.collect('query-execution-id');
 console.log(result.rows);       // ParsedRow[]
@@ -68,6 +74,25 @@ for await (const row of collector.stream('query-execution-id', (row) => row)) {
 }
 ```
 
+### Cancellation (AbortSignal)
+
+You can cancel long-running collection/streaming/batch loops using `CollectorOptions.signal`.
+When aborted, the collector throws an `AbortError`.
+
+```typescript
+const controller = new AbortController();
+
+const collector = new AthenaQueryResultCollector(client, {
+  signal: controller.signal,
+  retryCount: 3,
+  retryDelayMs: 1000,
+});
+
+setTimeout(() => controller.abort(), 5_000);
+
+await collector.collect('query-execution-id'); // throws AbortError if aborted
+```
+
 ### Batch processing
 
 ```typescript
@@ -89,8 +114,9 @@ await collector.processBatches(
 | --- | --- | --- |
 | `maxRows` | `number` | Maximum number of rows to process (unlimited if omitted) |
 | `onPage` | `function` | Callback called after each fetched page in `collect()` / `collectWith()` |
-| `retryCount` | `number` | Retry count on page fetch failure (default: `0`; invalid/negative values are normalized) |
+| `retryCount` | `number` | Retry count for transient page fetch failures only (default: `0`; invalid/negative values are normalized) |
 | `retryDelayMs` | `number` | Delay in milliseconds between retries (default: `1000`; invalid/negative values are normalized) |
+| `signal` | `AbortSignal` | Abort long-running collection/stream/batch loops (throws `AbortError` when aborted) |
 
 You can also pass `PagerOptions` from `athena-query-result-pager` (e.g. page size).
 

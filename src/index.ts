@@ -13,6 +13,14 @@ export interface CollectorOptions extends PagerOptions {
   retryCount?: number;
   /** Retry interval in ms (default: 1000) */
   retryDelayMs?: number;
+  /**
+   * AbortSignal to cancel long-running collection / streaming / batch processing.
+   *
+   * When aborted, the collector will stop looping and throw an `AbortError`.
+   * If the underlying pager/client supports aborting in-flight requests via the same signal
+   * (e.g. through PagerOptions), it will also be propagated via the constructor options.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -39,6 +47,7 @@ export class AthenaQueryResultCollector {
   private readonly options: CollectorOptions;
   private readonly retryCount: number;
   private readonly retryDelayMs: number;
+  private readonly signal?: AbortSignal;
 
   constructor(client: AthenaClient, options: CollectorOptions = {}) {
     const retryCount = this.normalizeNonNegativeInteger(options.retryCount, 0);
@@ -52,7 +61,90 @@ export class AthenaQueryResultCollector {
       retryCount,
       retryDelayMs,
     };
+    this.signal = options.signal;
   }
+
+  /**
+   * Determines whether an error is likely transient and safe to retry.
+   *
+   * This is intentionally conservative: authentication/authorization/validation errors
+   * should fail fast rather than being retried.
+   */
+  private readonly isRetryableError = (error: unknown): boolean => {
+    const err = error as any;
+
+    // AWS SDK v3 / Smithy-style metadata (best signal)
+    const httpStatusCode: number | undefined =
+      err?.$metadata?.httpStatusCode ??
+      err?.$response?.httpResponse?.statusCode;
+
+    if (typeof httpStatusCode === 'number') {
+      // Retry only on transient HTTP statuses
+      if (httpStatusCode >= 500) {
+        return true;
+      }
+
+      if (httpStatusCode === 408 || httpStatusCode === 429) {
+        return true;
+      }
+
+      return false;
+    }
+
+    // Smithy retry hints
+    if (err?.$retryable?.throttling === true || err?.$retryable === true) {
+      return true;
+    }
+
+    // Common AWS / HTTP-like error identifiers
+    const nameOrCode: string | undefined =
+      (typeof err?.name === 'string' ? err.name : undefined) ??
+      (typeof err?.Code === 'string' ? err.Code : undefined) ??
+      (typeof err?.code === 'string' ? err.code : undefined);
+
+    const throttlingCodes = new Set<string>([
+      'Throttling',
+      'ThrottlingException',
+      'TooManyRequestsException',
+      'RequestLimitExceeded',
+      'RequestThrottled',
+      'RequestThrottledException',
+      'SlowDown',
+      'ProvisionedThroughputExceededException',
+    ]);
+
+    if (nameOrCode && throttlingCodes.has(nameOrCode)) {
+      return true;
+    }
+
+    // Node/network transient errors
+    const nodeErrorCodes = new Set<string>([
+      'ETIMEDOUT',
+      'ECONNRESET',
+      'EPIPE',
+      'EAI_AGAIN',
+      'ENOTFOUND',
+      'ECONNREFUSED',
+      'EHOSTUNREACH',
+      'ENETUNREACH',
+      'EADDRINUSE',
+    ]);
+
+    if (typeof err?.code === 'string' && nodeErrorCodes.has(err.code)) {
+      return true;
+    }
+
+    const message = typeof err?.message === 'string' ? err.message : '';
+    if (typeof nameOrCode === 'string' && nameOrCode.toLowerCase().includes('timeout')) {
+      return true;
+    }
+
+    if (message.toLowerCase().includes('timeout') || message.toLowerCase().includes('timed out')) {
+      return true;
+    }
+
+    return false;
+  };
 
   /**
    * Collect all rows (raw ParsedRow format)
@@ -82,6 +174,7 @@ export class AthenaQueryResultCollector {
     this.pager.reset();
 
     do {
+      this.throwIfAborted();
       const page = await this.fetchPageWithRetry(
         queryExecutionId,
         rowParser,
@@ -104,6 +197,7 @@ export class AthenaQueryResultCollector {
 
       // onPage callback
       if (this.options.onPage) {
+        this.throwIfAborted();
         await this.options.onPage(page, rows.length);
       }
 
@@ -133,6 +227,7 @@ export class AthenaQueryResultCollector {
     this.pager.reset();
 
     do {
+      this.throwIfAborted();
       const page = await this.fetchPageWithRetry(
         queryExecutionId,
         rowParser,
@@ -140,6 +235,7 @@ export class AthenaQueryResultCollector {
       );
 
       for (const row of page.rows) {
+        this.throwIfAborted();
         // maxRows check
         if (this.options.maxRows !== undefined && count >= this.options.maxRows) {
           return;
@@ -171,6 +267,7 @@ export class AthenaQueryResultCollector {
     this.pager.reset();
 
     do {
+      this.throwIfAborted();
       if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
         break;
       }
@@ -187,6 +284,7 @@ export class AthenaQueryResultCollector {
         rowsToProcess = page.rows.slice(0, remaining);
       }
 
+      this.throwIfAborted();
       await batchProcessor(rowsToProcess, pageCount);
 
       pageCount++;
@@ -204,7 +302,10 @@ export class AthenaQueryResultCollector {
   }
 
   /**
-   * Fetch a page with retry
+   * Fetch a single result page with retry.
+   *
+   * Retries are performed only for transient failures (throttling, 5xx, timeouts, etc.).
+   * Permanent failures (auth/permission/validation) fail fast.
    */
   private async fetchPageWithRetry<T>(
     queryExecutionId: string,
@@ -214,12 +315,22 @@ export class AthenaQueryResultCollector {
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= this.retryCount; attempt++) {
+      this.throwIfAborted();
       try {
         return await this.pager.fetchPageWith(queryExecutionId, rowParser, nextToken);
       } catch (error) {
-        lastError = error as Error;
+        this.throwIfAborted();
+        const err = error as Error;
+        lastError = err;
+
+        // Fail-fast on permanent errors (auth/permission/validation, etc.)
+        if (!this.isRetryableError(error)) {
+          throw err;
+        }
+
         if (attempt < this.retryCount) {
           await this.sleep(this.retryDelayMs);
+          continue;
         }
       }
     }
@@ -239,8 +350,53 @@ export class AthenaQueryResultCollector {
     return Math.floor(value);
   }
 
+  private throwIfAborted(): void {
+    if (!this.signal) {
+      return;
+    }
+
+    if (!this.signal.aborted) {
+      return;
+    }
+
+    throw this.createAbortError();
+  }
+
+  private createAbortError(): Error {
+    const error = new Error(this.signal?.reason instanceof Error ? this.signal.reason.message : 'Aborted');
+    (error as unknown as { name: string }).name = 'AbortError';
+    return error;
+  }
+
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    if (!this.signal) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    const signal = this.signal;
+
+    if (signal.aborted) {
+      return Promise.reject(this.createAbortError());
+    }
+
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        cleanup();
+        reject(this.createAbortError());
+      };
+
+      const timeout = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, ms);
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        signal.removeEventListener('abort', onAbort);
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /**
