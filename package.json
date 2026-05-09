@@ -1,5 +1,6 @@
 {
   "name": "athena-query-result-collector",
+  "description": "A TypeScript library for collecting AWS Athena query results via pagination. It supports full collection, streaming, and page-based batch processing, and it uses athena-query-result-pager internally.",
   "repository": {
     "type": "git",
     "url": "https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector.git"
@@ -51,6 +52,17 @@
     "@aws-sdk/client-athena": "^3.983.0",
     "athena-query-result-pager": "^0.3.0"
   },
+  "keywords": [
+    "abort",
+    "athena",
+    "aws",
+    "collector",
+    "pagination",
+    "query",
+    "result",
+    "retry",
+    "signal"
+  ],
   "engines": {
     "node": ">= 20.0.0"
   },
