@@ -9,7 +9,7 @@ const project = new typescript.TypeScriptProject({
   packageManager: javascript.NodePackageManager.YARN_CLASSIC,
   repository: 'https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector.git',
   description: 'A TypeScript library for collecting AWS Athena query results via pagination. It supports full collection, streaming, and page-based batch processing, and it uses athena-query-result-pager internally.',
-  keywords: [ 'aws', 'athena', 'query', 'result', 'collector', 'pagination', 'retry', 'abort', 'signal' ],
+  keywords: ['aws', 'athena', 'query', 'result', 'collector', 'pagination', 'retry', 'abort', 'signal'],
   releaseToNpm: true,
   npmTrustedPublishing: true,
   npmAccess: javascript.NpmAccess.PUBLIC,
