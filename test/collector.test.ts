@@ -479,4 +479,69 @@ describe('AthenaQueryResultCollector', () => {
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('signal', () => {
+    it('should throw AbortError when signal is already aborted before collect', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+
+      await expect(collector.collect(queryExecutionId)).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockFetchPageWith).not.toHaveBeenCalled();
+    });
+
+    it('should abort during retry delay sleep and not call fetchPageWith again', async () => {
+      const controller = new AbortController();
+
+      const transient = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
+      mockFetchPageWith.mockRejectedValueOnce(transient);
+
+      const collector = new AthenaQueryResultCollector(mockClient, {
+        retryCount: 3,
+        retryDelayMs: 10_000,
+        signal: controller.signal,
+      });
+
+      const promise = collector.collect(queryExecutionId);
+      // Ensure the first attempt has started and moved into sleep.
+      await Promise.resolve();
+      controller.abort();
+
+      await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+    });
+
+    it('should abort during stream iteration', async () => {
+      const controller = new AbortController();
+      mockFetchPageWith.mockResolvedValueOnce({
+        rows: [{ id: 1 }, { id: 2 }, { id: 3 }],
+        rowCount: 3,
+      } as PageResult<{ id: number }>);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+      const gen = collector.stream(queryExecutionId, (r) => r);
+
+      expect((await gen.next()).value).toEqual({ id: 1 });
+      controller.abort();
+      await expect(gen.next()).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    it('should abort before invoking batchProcessor in processBatches', async () => {
+      const controller = new AbortController();
+      mockFetchPageWith.mockResolvedValueOnce({
+        rows: [{ n: 1 }],
+        rowCount: 1,
+      } as PageResult<{ n: number }>);
+
+      const batchProcessor = jest.fn();
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+      controller.abort();
+
+      await expect(
+        collector.processBatches(queryExecutionId, (r) => r, batchProcessor),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(batchProcessor).not.toHaveBeenCalled();
+    });
+  });
 });

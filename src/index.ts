@@ -13,6 +13,14 @@ export interface CollectorOptions extends PagerOptions {
   retryCount?: number;
   /** Retry interval in ms (default: 1000) */
   retryDelayMs?: number;
+  /**
+   * AbortSignal to cancel long-running collection / streaming / batch processing.
+   *
+   * When aborted, the collector will stop looping and throw an `AbortError`.
+   * If the underlying pager/client supports aborting in-flight requests via the same signal
+   * (e.g. through PagerOptions), it will also be propagated via the constructor options.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -39,6 +47,7 @@ export class AthenaQueryResultCollector {
   private readonly options: CollectorOptions;
   private readonly retryCount: number;
   private readonly retryDelayMs: number;
+  private readonly signal?: AbortSignal;
 
   constructor(client: AthenaClient, options: CollectorOptions = {}) {
     const retryCount = this.normalizeNonNegativeInteger(options.retryCount, 0);
@@ -52,6 +61,7 @@ export class AthenaQueryResultCollector {
       retryCount,
       retryDelayMs,
     };
+    this.signal = options.signal;
   }
 
   /**
@@ -164,6 +174,7 @@ export class AthenaQueryResultCollector {
     this.pager.reset();
 
     do {
+      this.throwIfAborted();
       const page = await this.fetchPageWithRetry(
         queryExecutionId,
         rowParser,
@@ -186,6 +197,7 @@ export class AthenaQueryResultCollector {
 
       // onPage callback
       if (this.options.onPage) {
+        this.throwIfAborted();
         await this.options.onPage(page, rows.length);
       }
 
@@ -215,6 +227,7 @@ export class AthenaQueryResultCollector {
     this.pager.reset();
 
     do {
+      this.throwIfAborted();
       const page = await this.fetchPageWithRetry(
         queryExecutionId,
         rowParser,
@@ -222,6 +235,7 @@ export class AthenaQueryResultCollector {
       );
 
       for (const row of page.rows) {
+        this.throwIfAborted();
         // maxRows check
         if (this.options.maxRows !== undefined && count >= this.options.maxRows) {
           return;
@@ -253,6 +267,7 @@ export class AthenaQueryResultCollector {
     this.pager.reset();
 
     do {
+      this.throwIfAborted();
       if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
         break;
       }
@@ -269,6 +284,7 @@ export class AthenaQueryResultCollector {
         rowsToProcess = page.rows.slice(0, remaining);
       }
 
+      this.throwIfAborted();
       await batchProcessor(rowsToProcess, pageCount);
 
       pageCount++;
@@ -299,9 +315,11 @@ export class AthenaQueryResultCollector {
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= this.retryCount; attempt++) {
+      this.throwIfAborted();
       try {
         return await this.pager.fetchPageWith(queryExecutionId, rowParser, nextToken);
       } catch (error) {
+        this.throwIfAborted();
         const err = error as Error;
         lastError = err;
 
@@ -332,8 +350,53 @@ export class AthenaQueryResultCollector {
     return Math.floor(value);
   }
 
+  private throwIfAborted(): void {
+    if (!this.signal) {
+      return;
+    }
+
+    if (!this.signal.aborted) {
+      return;
+    }
+
+    throw this.createAbortError();
+  }
+
+  private createAbortError(): Error {
+    const error = new Error(this.signal?.reason instanceof Error ? this.signal.reason.message : 'Aborted');
+    (error as unknown as { name: string }).name = 'AbortError';
+    return error;
+  }
+
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    if (!this.signal) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    const signal = this.signal;
+
+    if (signal.aborted) {
+      return Promise.reject(this.createAbortError());
+    }
+
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        cleanup();
+        reject(this.createAbortError());
+      };
+
+      const timeout = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, ms);
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        signal.removeEventListener('abort', onAbort);
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /**
