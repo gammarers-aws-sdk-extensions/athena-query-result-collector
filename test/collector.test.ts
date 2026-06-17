@@ -478,6 +478,42 @@ describe('AthenaQueryResultCollector', () => {
       await expect(collector.collect(queryExecutionId)).rejects.toThrow('invalid retry options');
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
+
+    it('should rethrow RangeError from pager without wrapping', async () => {
+      const rangeError = new RangeError('options.maxResults must be an integer between 1 and 1000');
+
+      mockFetchPageWith.mockRejectedValueOnce(rangeError);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3 });
+
+      await expect(collector.collect(queryExecutionId)).rejects.toBe(rangeError);
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+    });
+
+    it('should wrap string rejections in Error with the same message', async () => {
+      mockFetchPageWith.mockRejectedValueOnce('pager unavailable');
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('pager unavailable');
+    });
+
+    it('should wrap plain-object rejections in Error and preserve cause', async () => {
+      const rejection = { message: 'validation failed', field: 'maxResults' };
+
+      mockFetchPageWith.mockRejectedValueOnce(rejection);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('validation failed');
+      expect((error as Error & { cause?: unknown }).cause).toEqual(rejection);
+    });
   });
 
   describe('signal', () => {

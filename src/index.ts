@@ -100,7 +100,7 @@ export class AthenaQueryResultCollector {
    * Intentionally conservative: authentication, authorization, and validation errors
    * should fail fast rather than being retried.
    *
-   * @param error - Error thrown by the pager or AWS SDK.
+   * @param error - Rejected or thrown value from the pager or AWS SDK.
    * @returns `true` for throttling, 5xx, timeout, and similar transient failures.
    */
   private readonly isRetryableError = (error: unknown): boolean => {
@@ -369,6 +369,7 @@ export class AthenaQueryResultCollector {
    * @param nextToken - Continuation token; omit on the first page.
    * @returns One page of transformed rows and pagination metadata.
    * @throws {Error} When `AbortSignal` aborts (name `AbortError`), a permanent error occurs, or retries are exhausted.
+   *   Intentional `Error` subclasses (for example `RangeError`) are rethrown unchanged; other rejections are normalized to `Error`.
    */
   private async fetchPageWithRetry<T>(
     queryExecutionId: string,
@@ -383,15 +384,18 @@ export class AthenaQueryResultCollector {
         return await this.raceWithAbort(
           this.pager.fetchPageWith(queryExecutionId, rowParser, nextToken),
         );
-      } catch (error) {
+      } catch (error: unknown) {
         this.throwIfAborted();
-        const err = error as Error;
-        lastError = err;
 
-        // Fail-fast on permanent errors (auth/permission/validation, etc.)
-        if (!this.isRetryableError(error)) {
-          throw err;
+        if (this.isAbortError(error)) {
+          throw this.normalizeError(error);
         }
+
+        if (!this.isRetryableError(error)) {
+          throw this.normalizeError(error);
+        }
+
+        lastError = this.normalizeError(error);
 
         if (attempt < this.retryCount) {
           await this.sleep(this.retryDelayMs);
@@ -401,6 +405,73 @@ export class AthenaQueryResultCollector {
     }
 
     throw lastError ?? new Error('Failed to fetch page after retries');
+  }
+
+  /**
+   * Returns whether `error` represents an abort/cancellation (not a page-fetch failure).
+   *
+   * @param error - Rejected or thrown value.
+   */
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError';
+  }
+
+  /**
+   * Converts an unknown rejection into an `Error` without losing intentional subclasses.
+   *
+   * Existing `Error` instances (including `RangeError`, `TypeError`, and `AbortError`) are
+   * returned as-is. Other values are wrapped in `Error` with a derived message; non-primitive
+   * values are attached via `Error.cause` when available.
+   *
+   * @param error - Rejected or thrown value from the pager or AWS SDK.
+   * @returns An `Error` suitable for rethrowing to callers.
+   */
+  private normalizeError(error: unknown): Error {
+    if (error instanceof Error) {
+      return error;
+    }
+
+    if (typeof error === 'string') {
+      return new Error(error);
+    }
+
+    const message = this.extractErrorMessage(error);
+    const normalized = new Error(message);
+    if (error !== undefined) {
+      (normalized as Error & { cause?: unknown }).cause = error;
+    }
+    return normalized;
+  }
+
+  /**
+   * Derives a human-readable message from a non-`Error` rejection value.
+   *
+   * @param error - Rejected value that is not an `Error` instance.
+   */
+  private extractErrorMessage(error: unknown): string {
+    if (typeof error === 'string') {
+      return error;
+    }
+
+    if (typeof error === 'object' && error !== null) {
+      const record = error as Record<string, unknown>;
+      if (typeof record.message === 'string') {
+        return record.message;
+      }
+      if (typeof record.Message === 'string') {
+        return record.Message;
+      }
+    }
+
+    if (error === undefined) {
+      return 'Unknown error';
+    }
+
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
   }
 
   /**
@@ -502,7 +573,7 @@ export class AthenaQueryResultCollector {
         },
         (error: unknown) => {
           cleanup();
-          reject(error);
+          reject(this.normalizeError(error));
         },
       );
     });
