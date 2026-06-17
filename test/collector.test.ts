@@ -491,6 +491,27 @@ describe('AthenaQueryResultCollector', () => {
       expect(mockFetchPageWith).not.toHaveBeenCalled();
     });
 
+    it('should abort during in-flight page fetch', async () => {
+      const controller = new AbortController();
+      let resolveFetch!: (value: PageResult<{ id: number }>) => void;
+      const pendingFetch = new Promise<PageResult<{ id: number }>>((resolve) => {
+        resolveFetch = resolve;
+      });
+
+      mockFetchPageWith.mockReturnValueOnce(pendingFetch);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+      const collectPromise = collector.collect(queryExecutionId);
+
+      await Promise.resolve();
+      controller.abort();
+
+      await expect(collectPromise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+
+      resolveFetch({ rows: [{ id: 1 }], rowCount: 1 });
+    });
+
     it('should abort during retry delay sleep and not call fetchPageWith again', async () => {
       const controller = new AbortController();
 
