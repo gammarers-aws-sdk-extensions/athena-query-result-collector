@@ -1,8 +1,10 @@
+import { AthenaQueryResultPager } from 'athena-query-result-pager';
 import { AthenaQueryResultCollector } from '../src';
 import type { PageResult } from '../src';
 
 const mockFetchPageWith = jest.fn();
 const mockReset = jest.fn();
+const MockAthenaQueryResultPager = AthenaQueryResultPager as jest.MockedClass<typeof AthenaQueryResultPager>;
 
 jest.mock('athena-query-result-pager', () => ({
   AthenaQueryResultPager: jest.fn().mockImplementation(() => ({
@@ -19,6 +21,7 @@ describe('AthenaQueryResultCollector', () => {
     // clearAllMocks does not reset mock implementations; we want isolation between tests
     mockFetchPageWith.mockReset();
     mockReset.mockReset();
+    MockAthenaQueryResultPager.mockClear();
   });
 
   describe('constructor', () => {
@@ -34,6 +37,24 @@ describe('AthenaQueryResultCollector', () => {
       mockReset.mockImplementation(() => {});
       await collector.collect(queryExecutionId);
       expect(mockReset).toHaveBeenCalled();
+    });
+
+    it('should pass only PagerOptions fields to AthenaQueryResultPager', () => {
+      const parseResultSetOptions = { skipHeaderRow: true as const };
+      const signal = new AbortController().signal;
+
+      new AthenaQueryResultCollector(mockClient, {
+        maxResults: 500,
+        parseResultSetOptions,
+        maxRows: 100,
+        retryCount: 2,
+        signal,
+      });
+
+      expect(MockAthenaQueryResultPager).toHaveBeenCalledWith(mockClient, {
+        maxResults: 500,
+        parseResultSetOptions,
+      });
     });
   });
 

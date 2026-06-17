@@ -4,8 +4,9 @@ import { AthenaQueryResultPager, type ParsedRow, type RowParser, type PageResult
 /**
  * Options for {@link AthenaQueryResultCollector}.
  *
- * Extends {@link PagerOptions} from `athena-query-result-pager` (for example `maxResults`
- * and `queryResultType`), plus collection-specific limits, retries, progress callbacks, and cancellation.
+ * Extends {@link PagerOptions} from `athena-query-result-pager` (for example `maxResults`,
+ * `queryResultType`, and `parseResultSetOptions`), plus collection-specific limits, retries,
+ * progress callbacks, and cancellation.
  */
 export interface CollectorOptions extends PagerOptions {
   /**
@@ -83,7 +84,7 @@ export class AthenaQueryResultCollector {
     const retryCount = this.normalizeNonNegativeInteger(options.retryCount, 0);
     const retryDelayMs = this.normalizeNonNegativeInteger(options.retryDelayMs, 1000);
 
-    this.pager = new AthenaQueryResultPager(client, options);
+    this.pager = new AthenaQueryResultPager(client, this.toPagerOptions(options));
     this.retryCount = retryCount;
     this.retryDelayMs = retryDelayMs;
     this.options = {
@@ -92,6 +93,29 @@ export class AthenaQueryResultCollector {
       retryDelayMs,
     };
     this.signal = options.signal;
+  }
+
+  /**
+   * Picks pager-only fields from {@link CollectorOptions} for {@link AthenaQueryResultPager}.
+   *
+   * Collector-specific options (`maxRows`, `onPage`, retries, `signal`) are not forwarded.
+   *
+   * @param options - Full collector options from the constructor.
+   */
+  private toPagerOptions(options: CollectorOptions): PagerOptions {
+    const pagerOptions: PagerOptions = {};
+
+    if (options.maxResults !== undefined) {
+      pagerOptions.maxResults = options.maxResults;
+    }
+    if (options.queryResultType !== undefined) {
+      pagerOptions.queryResultType = options.queryResultType;
+    }
+    if (options.parseResultSetOptions !== undefined) {
+      pagerOptions.parseResultSetOptions = options.parseResultSetOptions;
+    }
+
+    return pagerOptions;
   }
 
   /**
@@ -627,4 +651,12 @@ export class AthenaQueryResultCollector {
 }
 
 /** Re-exports pager and parser types from `athena-query-result-pager`. */
-export type { ParsedRow, RowParser, PageResult, PagerOptions };
+export type {
+  HeaderRowDecision,
+  PageResult,
+  PagerOptions,
+  ParsedRow,
+  ParseResultSetOptions,
+  RowParser,
+} from 'athena-query-result-pager';
+export { QueryResultType } from 'athena-query-result-pager';
