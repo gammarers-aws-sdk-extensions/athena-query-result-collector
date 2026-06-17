@@ -1,8 +1,10 @@
+import { AthenaQueryResultPager } from 'athena-query-result-pager';
 import { AthenaQueryResultCollector } from '../src';
 import type { PageResult } from '../src';
 
 const mockFetchPageWith = jest.fn();
 const mockReset = jest.fn();
+const MockAthenaQueryResultPager = AthenaQueryResultPager as jest.MockedClass<typeof AthenaQueryResultPager>;
 
 jest.mock('athena-query-result-pager', () => ({
   AthenaQueryResultPager: jest.fn().mockImplementation(() => ({
@@ -19,6 +21,7 @@ describe('AthenaQueryResultCollector', () => {
     // clearAllMocks does not reset mock implementations; we want isolation between tests
     mockFetchPageWith.mockReset();
     mockReset.mockReset();
+    MockAthenaQueryResultPager.mockClear();
   });
 
   describe('constructor', () => {
@@ -34,6 +37,24 @@ describe('AthenaQueryResultCollector', () => {
       mockReset.mockImplementation(() => {});
       await collector.collect(queryExecutionId);
       expect(mockReset).toHaveBeenCalled();
+    });
+
+    it('should pass only PagerOptions fields to AthenaQueryResultPager', () => {
+      const parseResultSetOptions = { skipHeaderRow: true as const };
+      const signal = new AbortController().signal;
+
+      new AthenaQueryResultCollector(mockClient, {
+        maxResults: 500,
+        parseResultSetOptions,
+        maxRows: 100,
+        retryCount: 2,
+        signal,
+      });
+
+      expect(MockAthenaQueryResultPager).toHaveBeenCalledWith(mockClient, {
+        maxResults: 500,
+        parseResultSetOptions,
+      });
     });
   });
 
@@ -478,6 +499,42 @@ describe('AthenaQueryResultCollector', () => {
       await expect(collector.collect(queryExecutionId)).rejects.toThrow('invalid retry options');
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
+
+    it('should rethrow RangeError from pager without wrapping', async () => {
+      const rangeError = new RangeError('options.maxResults must be an integer between 1 and 1000');
+
+      mockFetchPageWith.mockRejectedValueOnce(rangeError);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3 });
+
+      await expect(collector.collect(queryExecutionId)).rejects.toBe(rangeError);
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+    });
+
+    it('should wrap string rejections in Error with the same message', async () => {
+      mockFetchPageWith.mockRejectedValueOnce('pager unavailable');
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('pager unavailable');
+    });
+
+    it('should wrap plain-object rejections in Error and preserve cause', async () => {
+      const rejection = { message: 'validation failed', field: 'maxResults' };
+
+      mockFetchPageWith.mockRejectedValueOnce(rejection);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('validation failed');
+      expect((error as Error & { cause?: unknown }).cause).toEqual(rejection);
+    });
   });
 
   describe('signal', () => {
@@ -489,6 +546,27 @@ describe('AthenaQueryResultCollector', () => {
 
       await expect(collector.collect(queryExecutionId)).rejects.toMatchObject({ name: 'AbortError' });
       expect(mockFetchPageWith).not.toHaveBeenCalled();
+    });
+
+    it('should abort during in-flight page fetch', async () => {
+      const controller = new AbortController();
+      let resolveFetch!: (value: PageResult<{ id: number }>) => void;
+      const pendingFetch = new Promise<PageResult<{ id: number }>>((resolve) => {
+        resolveFetch = resolve;
+      });
+
+      mockFetchPageWith.mockReturnValueOnce(pendingFetch);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+      const collectPromise = collector.collect(queryExecutionId);
+
+      await Promise.resolve();
+      controller.abort();
+
+      await expect(collectPromise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+
+      resolveFetch({ rows: [{ id: 1 }], rowCount: 1 });
     });
 
     it('should abort during retry delay sleep and not call fetchPageWith again', async () => {
