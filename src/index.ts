@@ -48,10 +48,17 @@ export interface CollectorOptions extends PagerOptions {
 /**
  * Result of {@link AthenaQueryResultCollector.collect} or {@link AthenaQueryResultCollector.collectWith}.
  *
+ * `rows` holds the full collected set in memory. For large result sets prefer
+ * {@link AthenaQueryResultCollector.stream}, {@link AthenaQueryResultCollector.processBatches},
+ * or the pager iterators from {@link AthenaQueryResultCollector.getPager}.
+ *
  * @typeParam T - Row type produced by the collector or custom {@link RowParser}.
  */
 export interface CollectResult<T> {
-  /** All collected rows (possibly truncated when `maxRows` is set). */
+  /**
+   * All collected rows (possibly truncated when `maxRows` is set).
+   * This array retains every collected row in memory.
+   */
   rows: T[];
   /** Same as `rows.length`. */
   totalRows: number;
@@ -67,6 +74,25 @@ export interface CollectResult<T> {
  *
  * Supports full in-memory collection, lazy row streaming, and per-page batch processing,
  * with optional row limits, transient-error retries, and cancellation via {@link AbortSignal}.
+ *
+ * {@link AthenaQueryResultCollector.stream} and {@link AthenaQueryResultCollector.processBatches}
+ * are thin wrappers over pager iterators (`iterateRows`, `iteratePagesWith`) that add collector
+ * options on top of pagination.
+ *
+ * Memory guidance: {@link AthenaQueryResultCollector.collect} and
+ * {@link AthenaQueryResultCollector.collectWith} accumulate every row into an array and may
+ * exhaust process memory on large results. Prefer {@link AthenaQueryResultCollector.stream}
+ * or {@link AthenaQueryResultCollector.processBatches} for large sets, or use
+ * {@link AthenaQueryResultCollector.getPager} and call `iterateRows` / `iteratePages`
+ * (or `iteratePagesWith`) for lower-level streaming.
+ *
+ * Concurrency: One instance is **not** safe for overlapping {@link AthenaQueryResultCollector.collect},
+ * {@link AthenaQueryResultCollector.collectWith}, {@link AthenaQueryResultCollector.stream}, or
+ * {@link AthenaQueryResultCollector.processBatches} calls. The internal pager keeps parser state
+ * (for example header-row bookkeeping) that {@link AthenaQueryResultPager.reset} clears between
+ * executions. A second in-flight operation throws. For parallel work, create separate collector
+ * instances (sharing the same `AthenaClient` is fine). Direct pager use via
+ * {@link AthenaQueryResultCollector.getPager} must also be serialized with collector operations.
  */
 export class AthenaQueryResultCollector {
 
@@ -75,6 +101,7 @@ export class AthenaQueryResultCollector {
   private readonly retryCount: number;
   private readonly retryDelayMs: number;
   private readonly signal?: AbortSignal;
+  private activeOperation?: 'collect' | 'stream' | 'processBatches';
 
   /**
    * @param client - AWS SDK v3 `AthenaClient` used to fetch query results.
@@ -116,6 +143,63 @@ export class AthenaQueryResultCollector {
     }
 
     return pagerOptions;
+  }
+
+  /**
+   * Marks the start of a collector operation and rejects overlapping use of the same instance.
+   *
+   * @param operation - The operation being started.
+   * @throws {Error} When another operation is already in flight on this collector.
+   */
+  private beginOperation(operation: 'collect' | 'stream' | 'processBatches'): void {
+    if (this.activeOperation !== undefined) {
+      const error = new Error(
+        `AthenaQueryResultCollector is already running ${this.activeOperation}; `
+        + 'use one operation at a time per instance or create a separate collector.',
+      );
+      error.name = 'CollectorConcurrentUseError';
+      throw error;
+    }
+
+    this.activeOperation = operation;
+  }
+
+  /**
+   * Clears the in-flight operation marker after `collect`, `stream`, or `processBatches` completes.
+   */
+  private endOperation(): void {
+    this.activeOperation = undefined;
+  }
+
+  /**
+   * Returns a pager view whose `fetchPageWith` applies collector retry, abort, and error normalization.
+   *
+   * Used by {@link AthenaQueryResultCollector.stream} and
+   * {@link AthenaQueryResultCollector.processBatches} so pagination follows the pager iterators
+   * (`iterateRows`, `iteratePagesWith`) while collector-specific fetch behavior stays centralized.
+   */
+  private createRetryingPager(): AthenaQueryResultPager {
+    const pager = this.pager;
+
+    return new Proxy(pager, {
+      get: (target, prop, receiver) => {
+        if (prop === 'fetchPageWith') {
+          return <T>(
+            queryExecutionId: string,
+            rowParser: RowParser<T>,
+            nextToken?: string,
+          ): Promise<PageResult<T>> =>
+            this.fetchPageWithRetry(queryExecutionId, rowParser, nextToken);
+        }
+
+        const value: unknown = Reflect.get(target, prop, receiver);
+        if (typeof value === 'function') {
+          return (value as (...args: unknown[]) => unknown).bind(receiver);
+        }
+
+        return value;
+      },
+    });
   }
 
   /**
@@ -204,18 +288,31 @@ export class AthenaQueryResultCollector {
   };
 
   /**
-   * Collects all rows as dictionary-shaped {@link ParsedRow} objects.
+   * Collects all rows as dictionary-shaped {@link ParsedRow} objects into a single in-memory array.
+   *
+   * Suitable for small-to-moderate results. Large result sets can exhaust process memory (OOM);
+   * use {@link AthenaQueryResultCollector.stream}, {@link AthenaQueryResultCollector.processBatches},
+   * or pager iterators via {@link AthenaQueryResultCollector.getPager} instead.
    *
    * @param queryExecutionId - Athena query execution identifier.
    * @returns Aggregated rows and collection metadata.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, or retries are exhausted.
+   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, retries are exhausted, or another operation is already in flight (name `CollectorConcurrentUseError`).
    */
   async collect(queryExecutionId: string): Promise<CollectResult<ParsedRow>> {
     return this.collectWith(queryExecutionId, (row) => row);
   }
 
   /**
-   * Collects all rows and maps each {@link ParsedRow} through `rowParser`.
+   * Collects all rows and maps each {@link ParsedRow} through `rowParser` into a single in-memory array.
+   *
+   * Uses {@link AthenaQueryResultPager.iteratePagesWith} for pagination and applies collector options
+   * (`maxRows`, `onPage`, retries, `signal`) on top of each fetched page.
+   *
+   * Accumulates every transformed row before returning. Suitable for small-to-moderate results.
+   * Large result sets can exhaust process memory (OOM); prefer
+   * {@link AthenaQueryResultCollector.stream} or {@link AthenaQueryResultCollector.processBatches},
+   * or call `iterateRows` / `iteratePages` / `iteratePagesWith` on
+   * {@link AthenaQueryResultCollector.getPager}.
    *
    * Respects {@link CollectorOptions.maxRows}, invokes {@link CollectorOptions.onPage} after each page,
    * and honors {@link CollectorOptions.signal} between pages and during retries.
@@ -224,61 +321,71 @@ export class AthenaQueryResultCollector {
    * @param queryExecutionId - Athena query execution identifier.
    * @param rowParser - Converts each parsed row into `T`.
    * @returns Aggregated transformed rows and collection metadata.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, or retries are exhausted.
+   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, retries are exhausted, or another operation is already in flight (name `CollectorConcurrentUseError`).
    */
   async collectWith<T>(
     queryExecutionId: string,
     rowParser: RowParser<T>,
   ): Promise<CollectResult<T>> {
+    this.beginOperation('collect');
+
     const rows: T[] = [];
-    let nextToken: string | undefined;
     let pageCount = 0;
     let truncated = false;
 
-    // Reset parser for new query
-    this.pager.reset();
+    try {
+      // Reset parser for new query
+      this.pager.reset();
 
-    do {
+      const retryingPager = this.createRetryingPager();
+
       this.throwIfAborted();
-      const page = await this.fetchPageWithRetry(
-        queryExecutionId,
-        rowParser,
-        nextToken,
-      );
 
-      pageCount++;
+      for await (const page of retryingPager.iteratePagesWith(queryExecutionId, rowParser)) {
+        this.throwIfAborted();
 
-      // maxRows check
-      if (this.options.maxRows !== undefined) {
-        const remaining = this.options.maxRows - rows.length;
-        if (page.rows.length >= remaining) {
-          rows.push(...page.rows.slice(0, remaining));
-          truncated = true;
-          break;
+        pageCount++;
+
+        // maxRows check
+        if (this.options.maxRows !== undefined) {
+          const remaining = this.options.maxRows - rows.length;
+          if (page.rows.length >= remaining) {
+            rows.push(...page.rows.slice(0, remaining));
+            truncated = true;
+            break;
+          }
+        }
+
+        rows.push(...page.rows);
+
+        // onPage callback
+        if (this.options.onPage) {
+          this.throwIfAborted();
+          await this.options.onPage(page, rows.length);
         }
       }
 
-      rows.push(...page.rows);
-
-      // onPage callback
-      if (this.options.onPage) {
-        this.throwIfAborted();
-        await this.options.onPage(page, rows.length);
-      }
-
-      nextToken = page.nextToken;
-    } while (nextToken);
-
-    return {
-      rows,
-      totalRows: rows.length,
-      pageCount,
-      truncated,
-    };
+      return {
+        rows,
+        totalRows: rows.length,
+        pageCount,
+        truncated,
+      };
+    } finally {
+      this.endOperation();
+    }
   }
 
   /**
    * Lazily yields rows one at a time without buffering the full result set in memory.
+   *
+   * Thin wrapper over {@link AthenaQueryResultPager.iterateRows} that adds
+   * {@link CollectorOptions.maxRows}, transient-error retries, and {@link CollectorOptions.signal}
+   * handling on top of pager pagination.
+   *
+   * Prefer this over {@link AthenaQueryResultCollector.collect} /
+   * {@link AthenaQueryResultCollector.collectWith} when the result set may be large.
+   * Only the current page is retained while iterating.
    *
    * Stops after {@link CollectorOptions.maxRows} rows when set. Checks
    * {@link CollectorOptions.signal} before each page fetch and before each yielded row.
@@ -287,26 +394,24 @@ export class AthenaQueryResultCollector {
    * @param queryExecutionId - Athena query execution identifier.
    * @param rowParser - Converts each parsed row into `T`.
    * @yields Successive `T` values in execution order.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, or retries are exhausted.
+   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, retries are exhausted, or another operation is already in flight (name `CollectorConcurrentUseError`).
    */
   async *stream<T>(
     queryExecutionId: string,
     rowParser: RowParser<T>,
   ): AsyncGenerator<T> {
-    let nextToken: string | undefined;
+    this.beginOperation('stream');
+
     let count = 0;
 
-    this.pager.reset();
+    try {
+      this.pager.reset();
 
-    do {
+      const retryingPager = this.createRetryingPager();
+
       this.throwIfAborted();
-      const page = await this.fetchPageWithRetry(
-        queryExecutionId,
-        rowParser,
-        nextToken,
-      );
 
-      for (const row of page.rows) {
+      for await (const row of retryingPager.iterateRows(queryExecutionId, rowParser)) {
         this.throwIfAborted();
         // maxRows check
         if (this.options.maxRows !== undefined && count >= this.options.maxRows) {
@@ -315,13 +420,21 @@ export class AthenaQueryResultCollector {
         yield row;
         count++;
       }
-
-      nextToken = page.nextToken;
-    } while (nextToken);
+    } finally {
+      this.endOperation();
+    }
   }
 
   /**
    * Processes each fetched page through `batchProcessor` without accumulating all rows in memory.
+   *
+   * Thin wrapper over {@link AthenaQueryResultPager.iteratePagesWith} that adds
+   * {@link CollectorOptions.maxRows}, transient-error retries, and {@link CollectorOptions.signal}
+   * handling on top of pager pagination.
+   *
+   * Prefer this over {@link AthenaQueryResultCollector.collect} /
+   * {@link AthenaQueryResultCollector.collectWith} when writing or forwarding page-sized chunks
+   * from a large result set. Only the current page is passed to `batchProcessor`.
    *
    * Respects {@link CollectorOptions.maxRows} across pages and checks
    * {@link CollectorOptions.signal} before each fetch and before invoking `batchProcessor`.
@@ -331,53 +444,57 @@ export class AthenaQueryResultCollector {
    * @param rowParser - Converts each parsed row into `T`.
    * @param batchProcessor - Receives the rows for one page and its zero-based index.
    * @returns Total rows processed and number of pages handled.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, or retries are exhausted.
+   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, retries are exhausted, or another operation is already in flight (name `CollectorConcurrentUseError`).
    */
   async processBatches<T>(
     queryExecutionId: string,
     rowParser: RowParser<T>,
     batchProcessor: (rows: T[], pageIndex: number) => void | Promise<void>,
   ): Promise<{ totalRows: number; pageCount: number }> {
+    this.beginOperation('processBatches');
 
-    let nextToken: string | undefined;
     let pageCount = 0;
     let totalRows = 0;
 
-    this.pager.reset();
+    try {
+      this.pager.reset();
 
-    do {
-      this.throwIfAborted();
-      if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
-        break;
+      if (this.options.maxRows === 0) {
+        return { totalRows: 0, pageCount: 0 };
       }
 
-      const page = await this.fetchPageWithRetry(
-        queryExecutionId,
-        rowParser,
-        nextToken,
-      );
-
-      let rowsToProcess = page.rows;
-      if (this.options.maxRows !== undefined) {
-        const remaining = Math.max(this.options.maxRows - totalRows, 0);
-        rowsToProcess = page.rows.slice(0, remaining);
-      }
+      const retryingPager = this.createRetryingPager();
 
       this.throwIfAborted();
-      await batchProcessor(rowsToProcess, pageCount);
 
-      pageCount++;
-      totalRows += rowsToProcess.length;
+      for await (const page of retryingPager.iteratePagesWith(queryExecutionId, rowParser)) {
+        this.throwIfAborted();
+        if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
+          break;
+        }
 
-      // maxRows check
-      if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
-        break;
+        let rowsToProcess = page.rows;
+        if (this.options.maxRows !== undefined) {
+          const remaining = Math.max(this.options.maxRows - totalRows, 0);
+          rowsToProcess = page.rows.slice(0, remaining);
+        }
+
+        this.throwIfAborted();
+        await batchProcessor(rowsToProcess, pageCount);
+
+        pageCount++;
+        totalRows += rowsToProcess.length;
+
+        // maxRows check
+        if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
+          break;
+        }
       }
 
-      nextToken = page.nextToken;
-    } while (nextToken);
-
-    return { totalRows, pageCount };
+      return { totalRows, pageCount };
+    } finally {
+      this.endOperation();
+    }
   }
 
   /**
@@ -642,6 +759,16 @@ export class AthenaQueryResultCollector {
 
   /**
    * Returns the internal {@link AthenaQueryResultPager} for advanced pagination use.
+   *
+   * For large result sets, call the pager's memory-efficient iterators directly
+   * (`iterateRows`, `iteratePages`, `iteratePagesWith`) instead of
+   * {@link AthenaQueryResultCollector.collect} / {@link AthenaQueryResultCollector.collectWith}.
+   * Note that collector options such as `maxRows`, `onPage`, retries, and `signal` are not
+   * applied when you drive the pager yourself.
+   *
+   * Do not use the pager while a collector operation is in flight on the same instance.
+   * The pager shares parser state with collector methods; call `pager.reset()` before each
+   * new `queryExecutionId` when driving the pager directly.
    *
    * @returns The pager instance constructed with the same client and {@link PagerOptions} fields from the collector options.
    */
