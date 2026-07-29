@@ -10,9 +10,9 @@ It supports full collection, streaming, and page-based batch processing, and it 
 
 ## Features
 
-- Collect all rows with `collect()` and metadata (`totalRows`, `pageCount`, `truncated`)
-- Transform rows with a custom parser using `collectWith()`
-- Stream rows lazily with `stream()` as an `AsyncGenerator`
+- Collect all rows with `collect()` and metadata (`totalRows`, `pageCount`, `truncated`) — **keeps the full result in memory**
+- Transform rows with a custom parser using `collectWith()` — **also accumulates every row in memory**
+- Stream rows lazily with `stream()` as an `AsyncGenerator` (memory-efficient for large results)
 - Process rows per page using `processBatches()` without buffering the full result set
 - Limit output with `maxRows` (strictly enforced for collection, streaming, and batch processing)
 - Invoke an `onPage` callback after each page in `collect()` / `collectWith()` for progress reporting
@@ -20,7 +20,38 @@ It supports full collection, streaming, and page-based batch processing, and it 
 - Retry transient page-fetch failures only (throttling, 5xx, timeouts) with `retryCount` / `retryDelayMs` (permanent errors fail fast)
 - Normalize unknown rejections to `Error` while preserving intentional subclasses such as `RangeError` from pager validation
 - Cancel long-running work via `AbortSignal` (`CollectorOptions.signal`): stop pagination loops, reject pending page-fetch waits, and interrupt retry backoff sleep (throws `AbortError`)
-- Access the underlying pager via `getPager()` for advanced pagination or header-row diagnostics
+- Access the underlying pager via `getPager()` for advanced pagination, header-row diagnostics, or pager iterators (`iterateRows` / `iteratePages`)
+
+## Choosing an API (memory)
+
+| API | Memory behavior | Use when |
+| --- | --- | --- |
+| `collect()` / `collectWith()` | Accumulates **all** rows into one array; large results can **OOM** | Small-to-moderate results that must fit in memory, or when you need aggregated metadata (`totalRows`, `pageCount`, `truncated`) |
+| `stream()` | Yields one row at a time via pager `iterateRows`; only the current page is retained | Large result sets consumed row-by-row |
+| `processBatches()` | Passes one page at a time via pager `iteratePagesWith`; does not accumulate all rows | Large result sets written or forwarded in page-sized chunks |
+| `getPager().iterateRows()` / `iteratePages()` / `iteratePagesWith()` | Same paging model as the pager (no full-set buffer); collector options are **not** applied | Lower-level control without collector retries/limits |
+
+Prefer `stream()`, `processBatches()`, or the pager iterators for huge Athena result sets. Use `collect()` / `collectWith()` only when the full set is known to fit comfortably in memory (or bound it with `maxRows`).
+
+## Concurrency (serial use per instance)
+
+One `AthenaQueryResultCollector` is intended for **serial** use:
+
+- Do **not** overlap `collect()` / `collectWith()`, `stream()`, or `processBatches()` on the same instance.
+- The internal pager keeps parser state (for example header-row bookkeeping). Each collector method calls `pager.reset()` before a new execution, but concurrent calls can corrupt that state.
+- Starting a second operation while one is in flight throws `CollectorConcurrentUseError`. For parallel queries, create one collector per execution (sharing the same `AthenaClient` is fine).
+- If you use `getPager()` directly, do not overlap pager iteration with collector methods on the same instance, and call `pager.reset()` before each new `queryExecutionId` (see [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager)).
+
+```typescript
+// Parallel work: separate collectors, shared client
+const collectorA = new AthenaQueryResultCollector(client);
+const collectorB = new AthenaQueryResultCollector(client);
+
+await Promise.all([
+  collectorA.collect('execution-a'),
+  collectorB.collect('execution-b'),
+]);
+```
 
 ## Requirements
 
@@ -43,6 +74,8 @@ yarn add athena-query-result-collector @aws-sdk/client-athena
 
 ### Basic collection (raw row data)
 
+`collect()` loads the full result into memory. For large Athena results, use `stream()`, `processBatches()`, or pager iterators instead (see [Choosing an API (memory)](#choosing-an-api-memory)).
+
 ```typescript
 import { AthenaClient } from '@aws-sdk/client-athena';
 import { AthenaQueryResultCollector } from 'athena-query-result-collector';
@@ -63,6 +96,8 @@ console.log(result.truncated);  // true if limited by maxRows
 
 ### Collection with custom parser
 
+`collectWith()` (like `collect()`) builds a full in-memory `rows` array. Avoid it for unbounded or very large results — prefer [Streaming](#streaming-asyncgenerator), [Batch processing](#batch-processing), or [Pager iterators](#pager-iterators-via-getpager) below.
+
 ```typescript
 const result = await collector.collectWith(
   'query-execution-id',
@@ -73,6 +108,9 @@ const result = await collector.collectWith(
 
 ### Streaming (AsyncGenerator)
 
+Memory-efficient alternative to `collect()` / `collectWith()` for large results.  
+Internally delegates to the pager's `iterateRows()` and adds `maxRows`, retries, and `signal` handling.
+
 ```typescript
 for await (const row of collector.stream('query-execution-id', (row) => row)) {
   console.log(row);
@@ -80,6 +118,9 @@ for await (const row of collector.stream('query-execution-id', (row) => row)) {
 ```
 
 ### Batch processing
+
+Processes one page at a time without buffering the full result set.  
+Internally delegates to the pager's `iteratePagesWith()` and adds `maxRows`, retries, and `signal` handling.
 
 ```typescript
 await collector.processBatches(
@@ -90,6 +131,22 @@ await collector.processBatches(
     await saveToDb(rows);
   },
 );
+```
+
+### Pager iterators via `getPager()`
+
+For lower-level, memory-efficient iteration, use the underlying [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) iterators. Collector options such as `maxRows`, `onPage`, retries, and `signal` are **not** applied when you drive the pager yourself.
+
+```typescript
+const pager = collector.getPager();
+
+for await (const row of pager.iterateRows('query-execution-id')) {
+  console.log(row);
+}
+
+for await (const page of pager.iteratePages('query-execution-id')) {
+  console.log(page.rowCount, page.rows);
+}
 ```
 
 ### Parser options (`parseResultSetOptions`)
@@ -160,6 +217,7 @@ Page-fetch failures are rethrown as `Error` instances suitable for caller-side h
 - Existing `Error` subclasses (for example `RangeError` from invalid `maxResults` at construction time, AWS SDK service errors) are **rethrown unchanged**
 - String or plain-object rejections are wrapped in `Error` with a derived message; non-primitive values are attached via `Error.cause` when available
 - `AbortError` is never retried
+- Overlapping `collect()` / `collectWith()`, `stream()`, or `processBatches()` on the same instance throws `CollectorConcurrentUseError`
 
 ```typescript
 try {
