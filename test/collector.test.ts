@@ -89,6 +89,16 @@ describe('AthenaQueryResultCollector', () => {
         parseResultSetOptions,
       });
     });
+
+    it('should forward queryResultType to pager when provided', () => {
+      new AthenaQueryResultCollector(mockClient, {
+        queryResultType: 'DATA_MANIFEST' as unknown as import('@aws-sdk/client-athena').QueryResultType,
+      });
+
+      expect(MockAthenaQueryResultPager).toHaveBeenCalledWith(mockClient, {
+        queryResultType: 'DATA_MANIFEST',
+      });
+    });
   });
 
   describe('getPager', () => {
@@ -740,6 +750,176 @@ describe('AthenaQueryResultCollector', () => {
 
       mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 });
       await expect(collector.collect('other-id')).resolves.toBeDefined();
+    });
+  });
+
+  describe('processBatches maxRows edge cases', () => {
+    it('should break at the top of the loop when maxRows is exactly met by a previous page', async () => {
+      mockFetchPageWith
+        .mockResolvedValueOnce({
+          rows: [{ a: 1 }, { a: 2 }],
+          nextToken: 't1',
+          rowCount: 2,
+        } as PageResult<unknown>)
+        .mockResolvedValueOnce({
+          rows: [{ a: 3 }],
+          nextToken: 't2',
+          rowCount: 1,
+        } as PageResult<unknown>)
+        .mockResolvedValueOnce({
+          rows: [{ a: 4 }],
+          rowCount: 1,
+        } as PageResult<unknown>);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2 });
+      const batches: unknown[][] = [];
+      const result = await collector.processBatches(
+        queryExecutionId,
+        (r) => r,
+        (rows) => { batches.push(rows); },
+      );
+
+      expect(batches).toHaveLength(1);
+      expect(result.totalRows).toBe(2);
+    });
+  });
+
+  describe('error normalization', () => {
+    it('should normalize rejection with Message (capital M) property', async () => {
+      mockFetchPageWith.mockRejectedValueOnce({ Message: 'service unavailable' });
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('service unavailable');
+    });
+
+    it('should normalize undefined rejection', async () => {
+      mockFetchPageWith.mockRejectedValueOnce(undefined);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('Unknown error');
+    });
+
+    it('should JSON-stringify an object with no message property', async () => {
+      mockFetchPageWith.mockRejectedValueOnce({ code: 42, detail: 'oops' });
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('42');
+      expect((error as Error & { cause?: unknown }).cause).toEqual({ code: 42, detail: 'oops' });
+    });
+
+    it('should handle objects that throw on JSON.stringify', async () => {
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+
+      mockFetchPageWith.mockRejectedValueOnce(circular);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('[object Object]');
+    });
+  });
+
+  describe('abort edge cases', () => {
+    it('should rethrow AbortError from fetchPageWith without retrying', async () => {
+      const abortError = new Error('Aborted');
+      abortError.name = 'AbortError';
+
+      mockFetchPageWith.mockRejectedValueOnce(abortError);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3, retryDelayMs: 1 });
+
+      await expect(collector.collect(queryExecutionId)).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+    });
+
+    it('should use string reason from AbortSignal in AbortError message', async () => {
+      const controller = new AbortController();
+      controller.abort('user cancelled');
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+      expect((error as Error).name).toBe('AbortError');
+      expect((error as Error).message).toBe('user cancelled');
+    });
+
+    it('should use Error reason from AbortSignal in AbortError message', async () => {
+      const controller = new AbortController();
+      controller.abort(new Error('timeout exceeded'));
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+      expect((error as Error).name).toBe('AbortError');
+      expect((error as Error).message).toBe('timeout exceeded');
+    });
+
+    it('should reject immediately in raceWithAbort when signal is already aborted', async () => {
+      const controller = new AbortController();
+
+      mockFetchPageWith.mockImplementation(() => {
+        controller.abort();
+        return new Promise<PageResult<unknown>>((resolve) => {
+          setTimeout(() => resolve({ rows: [{ id: 1 }], rowCount: 1 }), 100);
+        });
+      });
+
+      const collector = new AthenaQueryResultCollector(mockClient, {
+        signal: controller.signal,
+        retryCount: 1,
+        retryDelayMs: 1,
+      });
+
+      await expect(collector.collect(queryExecutionId)).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    it('should reject sleep immediately when signal is already aborted', async () => {
+      const controller = new AbortController();
+
+      const transient = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
+      mockFetchPageWith.mockRejectedValue(transient);
+
+      const collector = new AthenaQueryResultCollector(mockClient, {
+        retryCount: 2,
+        retryDelayMs: 100,
+        signal: controller.signal,
+      });
+
+      const promise = collector.collect(queryExecutionId);
+      await new Promise((r) => setTimeout(r, 10));
+      controller.abort();
+
+      await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    it('should complete sleep normally with signal when not aborted', async () => {
+      const controller = new AbortController();
+      const transient = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
+
+      mockFetchPageWith
+        .mockRejectedValueOnce(transient)
+        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 });
+
+      const collector = new AthenaQueryResultCollector(mockClient, {
+        retryCount: 1,
+        retryDelayMs: 10,
+        signal: controller.signal,
+      });
+
+      const result = await collector.collect(queryExecutionId);
+      expect(result.rows).toEqual([{ ok: true }]);
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
     });
   });
 });
