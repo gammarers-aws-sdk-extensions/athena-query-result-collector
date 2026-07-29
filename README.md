@@ -6,7 +6,7 @@
 ![node](https://img.shields.io/node/v/athena-query-result-collector)
 
 A TypeScript library for collecting AWS Athena query results via pagination.  
-It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) (^0.4.x) internally.
+It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) (^0.5.x) internally.
 
 ## Features
 
@@ -40,7 +40,7 @@ One `AthenaQueryResultCollector` is intended for **serial** use:
 - Do **not** overlap `collect()` / `collectWith()`, `stream()`, or `processBatches()` on the same instance.
 - The internal pager keeps parser state (for example header-row bookkeeping). Each collector method calls `pager.reset()` before a new execution, but concurrent calls can corrupt that state.
 - Starting a second operation while one is in flight throws `CollectorConcurrentUseError`. For parallel queries, create one collector per execution (sharing the same `AthenaClient` is fine).
-- If you use `getPager()` directly, do not overlap pager iteration with collector methods on the same instance, and call `pager.reset()` before each new `queryExecutionId` (see [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager)).
+- If you use `getPager()` directly, do not overlap pager iteration with collector methods on the same instance. The pager auto-resets parser state when `queryExecutionId` changes (see [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) 0.5+).
 
 ```typescript
 // Parallel work: separate collectors, shared client
@@ -58,7 +58,7 @@ await Promise.all([
 - Node.js >= 20.0.0
 - AWS Athena access configured for your runtime (credentials/region)
 - Runtime dependency: `@aws-sdk/client-athena` (pass an `AthenaClient` instance to the collector)
-- Bundled dependency: `athena-query-result-pager` ^0.4.x (installed automatically with this package)
+- Bundled dependency: `athena-query-result-pager` ^0.5.x (installed automatically with this package)
 
 ## Installation
 
@@ -242,7 +242,7 @@ try {
 
 ## Options
 
-`CollectorOptions` extends `PagerOptions` from `athena-query-result-pager` 0.4.x.  
+`CollectorOptions` extends `PagerOptions` from `athena-query-result-pager` 0.5.x.  
 Only pager fields are forwarded to the internal `AthenaQueryResultPager` instance.
 
 ### Collector options
@@ -261,7 +261,7 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 | --- | --- | --- |
 | `maxResults` | `number` | `MaxResults` per `GetQueryResults` request, integer `1`–`1000` (default: `1000`) |
 | `queryResultType` | `QueryResultType` | Result type forwarded to Athena (default: `DATA_ROWS`) |
-| `parseResultSetOptions` | `ParseResultSetOptions` | Parser options applied on every page (for example `skipHeaderRow`, `columnCountMismatchBehavior`, `headerRowDetectionStrategy`) |
+| `parseResultSetOptions` | `ParseResultSetOptions` | Parser options applied on every page (for example `skipHeaderRow`, `columnCountMismatchBehavior`, `headerRowDetectionStrategy`, `unavailableResultBehavior`) |
 
 ### Re-exported types and values
 

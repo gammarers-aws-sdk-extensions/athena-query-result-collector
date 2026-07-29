@@ -767,8 +767,9 @@ export class AthenaQueryResultCollector {
    * applied when you drive the pager yourself.
    *
    * Do not use the pager while a collector operation is in flight on the same instance.
-   * The pager shares parser state with collector methods; call `pager.reset()` before each
-   * new `queryExecutionId` when driving the pager directly.
+   * The pager shares parser state with collector methods. Pager 0.5+ auto-resets when
+   * `queryExecutionId` changes; {@link AthenaQueryResultPager.reset} is still available to
+   * clear state explicitly (for example before reusing the same execution id).
    *
    * @returns The pager instance constructed with the same client and {@link PagerOptions} fields from the collector options.
    */
