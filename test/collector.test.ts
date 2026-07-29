@@ -4,12 +4,45 @@ import type { PageResult } from '../src';
 
 const mockFetchPageWith = jest.fn();
 const mockReset = jest.fn();
+
+const pagerIterators = {
+  async *iteratePagesWith<T>(
+    this: { fetchPageWith: typeof mockFetchPageWith },
+    queryExecutionId: string,
+    rowParser: (row: unknown) => T,
+  ): AsyncGenerator<PageResult<T>> {
+    let nextToken: string | undefined;
+    do {
+      const page = await this.fetchPageWith(queryExecutionId, rowParser, nextToken);
+      yield page;
+      nextToken = page.nextToken;
+    } while (nextToken);
+  },
+  async *iterateRows<T>(
+    this: {
+      iteratePagesWith: (
+        queryExecutionId: string,
+        rowParser: (row: unknown) => T,
+      ) => AsyncGenerator<PageResult<T>>;
+    },
+    queryExecutionId: string,
+    rowParser: (row: unknown) => T,
+  ): AsyncGenerator<T> {
+    for await (const page of this.iteratePagesWith(queryExecutionId, rowParser)) {
+      for (const row of page.rows) {
+        yield row;
+      }
+    }
+  },
+};
+
 const MockAthenaQueryResultPager = AthenaQueryResultPager as jest.MockedClass<typeof AthenaQueryResultPager>;
 
 jest.mock('athena-query-result-pager', () => ({
   AthenaQueryResultPager: jest.fn().mockImplementation(() => ({
     fetchPageWith: mockFetchPageWith,
     reset: mockReset,
+    ...pagerIterators,
   })),
 }));
 
