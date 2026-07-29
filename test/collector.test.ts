@@ -622,4 +622,91 @@ describe('AthenaQueryResultCollector', () => {
       expect(batchProcessor).not.toHaveBeenCalled();
     });
   });
+
+  describe('concurrency', () => {
+    it('should reject overlapping collect operations', async () => {
+      let resolveFetch!: (value: PageResult<{ id: number }>) => void;
+      const pendingFetch = new Promise<PageResult<{ id: number }>>((resolve) => {
+        resolveFetch = resolve;
+      });
+
+      mockFetchPageWith.mockReturnValueOnce(pendingFetch);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      const first = collector.collect(queryExecutionId);
+      await Promise.resolve();
+
+      await expect(collector.collect('other-id')).rejects.toMatchObject({
+        name: 'CollectorConcurrentUseError',
+      });
+
+      resolveFetch({ rows: [], rowCount: 0 });
+      await first;
+    });
+
+    it('should reject stream while collect is in flight', async () => {
+      let resolveFetch!: (value: PageResult<{ id: number }>) => void;
+      const pendingFetch = new Promise<PageResult<{ id: number }>>((resolve) => {
+        resolveFetch = resolve;
+      });
+
+      mockFetchPageWith.mockReturnValueOnce(pendingFetch);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      const first = collector.collect(queryExecutionId);
+      await Promise.resolve();
+
+      const stream = collector.stream('other-id', (row) => row);
+      await expect(stream.next()).rejects.toMatchObject({
+        name: 'CollectorConcurrentUseError',
+      });
+
+      resolveFetch({ rows: [], rowCount: 0 });
+      await first;
+    });
+
+    it('should reject processBatches while stream is in flight', async () => {
+      mockFetchPageWith.mockResolvedValue({
+        rows: [{ id: 1 }],
+        nextToken: 'more',
+        rowCount: 1,
+      } as PageResult<{ id: number }>);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      const stream = collector.stream(queryExecutionId, (row) => row);
+      await stream.next();
+
+      await expect(
+        collector.processBatches(queryExecutionId, (row) => row, jest.fn()),
+      ).rejects.toMatchObject({
+        name: 'CollectorConcurrentUseError',
+      });
+
+      await stream.return(undefined);
+    });
+
+    it('should allow a new operation after the previous one completes', async () => {
+      mockFetchPageWith.mockResolvedValue({ rows: [], rowCount: 0 });
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      await collector.collect(queryExecutionId);
+      await expect(collector.collect('other-id')).resolves.toBeDefined();
+    });
+
+    it('should release the lock when stream iteration ends early', async () => {
+      mockFetchPageWith.mockResolvedValue({
+        rows: [{ id: 1 }],
+        nextToken: 'more',
+        rowCount: 1,
+      } as PageResult<{ id: number }>);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+      const stream = collector.stream(queryExecutionId, (row) => row);
+      await stream.next();
+      await stream.return(undefined);
+
+      mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+      await expect(collector.collect('other-id')).resolves.toBeDefined();
+    });
+  });
 });
