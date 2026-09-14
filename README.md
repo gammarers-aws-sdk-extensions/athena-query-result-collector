@@ -28,8 +28,8 @@ It supports full collection, streaming, and page-based batch processing, and it 
 | API | Memory behavior | Use when |
 | --- | --- | --- |
 | `collect()` / `collectWith()` | Accumulates **all** rows into one array; large results can **OOM** | Small-to-moderate results that must fit in memory, or when you need aggregated metadata (`totalRows`, `pageCount`, `truncated`) |
-| `stream()` | Yields one row at a time via pager `iterateRows`; only the current page is retained | Large result sets consumed row-by-row |
-| `processBatches()` | Passes one page at a time via pager `iteratePagesWith`; does not accumulate all rows | Large result sets written or forwarded in page-sized chunks |
+| `stream()` | Yields one row at a time from collector-paginated pages; only the current page is retained | Large result sets consumed row-by-row |
+| `processBatches()` | Passes one collector-paginated page at a time; does not accumulate all rows | Large result sets written or forwarded in page-sized chunks |
 | `getPager().iterateRows()` / `iteratePages()` / `iteratePagesWith()` | Same paging model as the pager (no full-set buffer); collector options are **not** applied | Lower-level control without collector retries/limits |
 
 Prefer `stream()`, `processBatches()`, or the pager iterators for huge Athena result sets. Use `collect()` / `collectWith()` only when the full set is known to fit comfortably in memory (or bound it with `maxRows`).
@@ -110,7 +110,7 @@ const result = await collector.collectWith(
 ### Streaming (AsyncGenerator)
 
 Memory-efficient alternative to `collect()` / `collectWith()` for large results.  
-Internally delegates to the pager's `iterateRows()` and adds `maxRows`, retries, and `signal` handling.
+Paginates like the pager's `iterateRows()` (fetch pages until there is no `nextToken`) and adds `maxRows`, retries, and `signal` handling.
 
 ```typescript
 for await (const row of collector.stream('query-execution-id', (row) => row)) {
@@ -121,7 +121,7 @@ for await (const row of collector.stream('query-execution-id', (row) => row)) {
 ### Batch processing
 
 Processes one page at a time without buffering the full result set.  
-Internally delegates to the pager's `iteratePagesWith()` and adds `maxRows`, retries, and `signal` handling.
+Paginates like the pager's `iteratePagesWith()` (fetch pages until there is no `nextToken`) and adds `maxRows`, retries, and `signal` handling.
 
 ```typescript
 await collector.processBatches(
