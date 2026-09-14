@@ -4,6 +4,8 @@ import {
   AthenaQueryResultCollectorError,
   AthenaQueryResultCollectorAbortError,
   AthenaQueryResultCollectorConcurrentUseError,
+  AthenaQueryResultPagerError,
+  AthenaQueryResultPagerInvalidMaxResultsError,
   type PageResult,
 } from '../src';
 
@@ -43,13 +45,17 @@ const pagerIterators = {
 
 const MockAthenaQueryResultPager = AthenaQueryResultPager as jest.MockedClass<typeof AthenaQueryResultPager>;
 
-jest.mock('athena-query-result-pager', () => ({
-  AthenaQueryResultPager: jest.fn().mockImplementation(() => ({
-    fetchPageWith: mockFetchPageWith,
-    reset: mockReset,
-    ...pagerIterators,
-  })),
-}));
+jest.mock('athena-query-result-pager', () => {
+  const actual = jest.requireActual<typeof import('athena-query-result-pager')>('athena-query-result-pager');
+  return {
+    ...actual,
+    AthenaQueryResultPager: jest.fn().mockImplementation(() => ({
+      fetchPageWith: mockFetchPageWith,
+      reset: mockReset,
+      ...pagerIterators,
+    })),
+  };
+});
 
 describe('AthenaQueryResultCollector', () => {
   const mockClient = {} as any;
@@ -548,17 +554,18 @@ describe('AthenaQueryResultCollector', () => {
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
 
-    it('should rethrow RangeError from pager without wrapping', async () => {
-      const rangeError = new RangeError('options.maxResults must be an integer between 1 and 1000');
+    it('should rethrow AthenaQueryResultPagerInvalidMaxResultsError from pager without wrapping', async () => {
+      const pagerError = new AthenaQueryResultPagerInvalidMaxResultsError(1001);
 
-      mockFetchPageWith.mockRejectedValueOnce(rangeError);
+      mockFetchPageWith.mockRejectedValueOnce(pagerError);
 
       const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3 });
 
       const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
 
-      expect(error).toBe(rangeError);
-      expect(error).toBeInstanceOf(RangeError);
+      expect(error).toBe(pagerError);
+      expect(error).toBeInstanceOf(AthenaQueryResultPagerInvalidMaxResultsError);
+      expect(error).toBeInstanceOf(AthenaQueryResultPagerError);
       expect(error).not.toBeInstanceOf(AthenaQueryResultCollectorError);
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });

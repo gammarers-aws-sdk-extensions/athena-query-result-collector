@@ -119,6 +119,7 @@ export class AthenaQueryResultCollector {
   /**
    * @param client - AWS SDK v3 `AthenaClient` used to fetch query results.
    * @param options - Collection limits, retries, pager settings, and optional abort signal.
+   * @throws {AthenaQueryResultPagerInvalidMaxResultsError} When `maxResults` is not an integer in `1..1000`.
    */
   constructor(client: AthenaClient, options: CollectorOptions = {}) {
     const retryCount = this.normalizeNonNegativeInteger(options.retryCount, 0);
@@ -323,7 +324,7 @@ export class AthenaQueryResultCollector {
    * @returns Aggregated rows and collection metadata.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser are rethrown unchanged.
+   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async collect(queryExecutionId: string): Promise<CollectResult<ParsedRow>> {
     return this.collectWith(queryExecutionId, (row) => row);
@@ -351,7 +352,7 @@ export class AthenaQueryResultCollector {
    * @returns Aggregated transformed rows and collection metadata.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser are rethrown unchanged.
+   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async collectWith<T>(
     queryExecutionId: string,
@@ -425,7 +426,7 @@ export class AthenaQueryResultCollector {
    * @yields Successive `T` values in execution order.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser are rethrown unchanged.
+   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async *stream<T>(
     queryExecutionId: string,
@@ -476,7 +477,7 @@ export class AthenaQueryResultCollector {
    * @returns Total rows processed and number of pages handled.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser are rethrown unchanged.
+   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async processBatches<T>(
     queryExecutionId: string,
@@ -541,7 +542,8 @@ export class AthenaQueryResultCollector {
    * @returns One page of transformed rows and pagination metadata.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {Error} When a permanent error occurs, or retries are exhausted.
-   *   Intentional `Error` subclasses (for example `RangeError`) are rethrown unchanged; other rejections are normalized to `Error` with `cause`.
+   *   Intentional `Error` subclasses (for example {@link AthenaQueryResultPagerError}, parser errors, `RangeError`)
+   *   are rethrown unchanged; other rejections are normalized to `Error` with `cause`.
    */
   private async fetchPageWithRetry<T>(
     queryExecutionId: string,
@@ -603,7 +605,7 @@ export class AthenaQueryResultCollector {
    * - AbortSignal-style errors (`error.name === 'AbortError'`, including `DOMException`) are
    *   wrapped as {@link AthenaQueryResultCollectorAbortError} with the original value in `cause`, so callers can
    *   use both `instanceof AthenaQueryResultCollectorError` and `error.name === 'AbortError'`.
-   * - Other existing `Error` instances (pager/parser `RangeError`, AWS SDK errors, and similar)
+   * - Other existing `Error` instances (pager {@link AthenaQueryResultPagerError}, parser errors, AWS SDK errors, and similar)
    *   are returned as-is so original `instanceof` checks keep working.
    * - Non-`Error` values are wrapped in `Error` with a derived message and `Error.cause`.
    *
@@ -821,7 +823,7 @@ export class AthenaQueryResultCollector {
    * applied when you drive the pager yourself.
    *
    * Do not use the pager while a collector operation is in flight on the same instance.
-   * The pager shares parser state with collector methods. Pager 0.5+ auto-resets when
+   * The pager shares parser state with collector methods. The pager auto-resets when
    * `queryExecutionId` changes; {@link AthenaQueryResultPager.reset} is still available to
    * clear state explicitly (for example before reusing the same execution id).
    *
@@ -838,6 +840,12 @@ export {
   AthenaQueryResultCollectorConcurrentUseError,
   type CollectorErrorOptions,
 } from './errors';
+
+export {
+  AthenaQueryResultPagerEmptyQueryExecutionIdError,
+  AthenaQueryResultPagerError,
+  AthenaQueryResultPagerInvalidMaxResultsError,
+} from 'athena-query-result-pager';
 
 /** Re-exports pager and parser types from `athena-query-result-pager`. */
 export type {
