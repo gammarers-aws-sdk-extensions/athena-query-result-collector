@@ -1,5 +1,10 @@
 import { AthenaClient } from '@aws-sdk/client-athena';
 import { AthenaQueryResultPager, type ParsedRow, type RowParser, type PageResult, type PagerOptions } from 'athena-query-result-pager';
+import {
+  AthenaQueryResultCollectorError,
+  AthenaQueryResultCollectorAbortError,
+  AthenaQueryResultCollectorConcurrentUseError,
+} from './errors';
 
 /**
  * Options for {@link AthenaQueryResultCollector}.
@@ -38,7 +43,8 @@ export interface CollectorOptions extends PagerOptions {
    * Optional `AbortSignal` to cancel long-running collection, streaming, or batch processing.
    *
    * When aborted, the collector stops pagination loops, rejects pending page-fetch waits,
-   * and interrupts retry backoff sleep, then throws an `AbortError` (`DOMException` when available).
+   * and interrupts retry backoff sleep, then throws {@link AthenaQueryResultCollectorAbortError}
+   * (`name === 'AbortError'` for AbortSignal ecosystem compatibility).
    * In-flight HTTP requests are not cancelled unless the underlying pager or AWS SDK client
    * honors the same signal.
    */
@@ -149,16 +155,11 @@ export class AthenaQueryResultCollector {
    * Marks the start of a collector operation and rejects overlapping use of the same instance.
    *
    * @param operation - The operation being started.
-   * @throws {Error} When another operation is already in flight on this collector.
+   * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight on this collector.
    */
   private beginOperation(operation: 'collect' | 'stream' | 'processBatches'): void {
     if (this.activeOperation !== undefined) {
-      const error = new Error(
-        `AthenaQueryResultCollector is already running ${this.activeOperation}; `
-        + 'use one operation at a time per instance or create a separate collector.',
-      );
-      error.name = 'CollectorConcurrentUseError';
-      throw error;
+      throw new AthenaQueryResultCollectorConcurrentUseError(this.activeOperation);
     }
 
     this.activeOperation = operation;
@@ -296,7 +297,9 @@ export class AthenaQueryResultCollector {
    *
    * @param queryExecutionId - Athena query execution identifier.
    * @returns Aggregated rows and collection metadata.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, retries are exhausted, or another operation is already in flight (name `CollectorConcurrentUseError`).
+   * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
+   * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
+   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser are rethrown unchanged.
    */
   async collect(queryExecutionId: string): Promise<CollectResult<ParsedRow>> {
     return this.collectWith(queryExecutionId, (row) => row);
@@ -321,7 +324,9 @@ export class AthenaQueryResultCollector {
    * @param queryExecutionId - Athena query execution identifier.
    * @param rowParser - Converts each parsed row into `T`.
    * @returns Aggregated transformed rows and collection metadata.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, retries are exhausted, or another operation is already in flight (name `CollectorConcurrentUseError`).
+   * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
+   * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
+   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser are rethrown unchanged.
    */
   async collectWith<T>(
     queryExecutionId: string,
@@ -394,7 +399,9 @@ export class AthenaQueryResultCollector {
    * @param queryExecutionId - Athena query execution identifier.
    * @param rowParser - Converts each parsed row into `T`.
    * @yields Successive `T` values in execution order.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, retries are exhausted, or another operation is already in flight (name `CollectorConcurrentUseError`).
+   * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
+   * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
+   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser are rethrown unchanged.
    */
   async *stream<T>(
     queryExecutionId: string,
@@ -444,7 +451,9 @@ export class AthenaQueryResultCollector {
    * @param rowParser - Converts each parsed row into `T`.
    * @param batchProcessor - Receives the rows for one page and its zero-based index.
    * @returns Total rows processed and number of pages handled.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), page fetch fails permanently, retries are exhausted, or another operation is already in flight (name `CollectorConcurrentUseError`).
+   * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
+   * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
+   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser are rethrown unchanged.
    */
   async processBatches<T>(
     queryExecutionId: string,
@@ -509,8 +518,9 @@ export class AthenaQueryResultCollector {
    * @param rowParser - Converts each parsed row into `T`.
    * @param nextToken - Continuation token; omit on the first page.
    * @returns One page of transformed rows and pagination metadata.
-   * @throws {Error} When `AbortSignal` aborts (name `AbortError`), a permanent error occurs, or retries are exhausted.
-   *   Intentional `Error` subclasses (for example `RangeError`) are rethrown unchanged; other rejections are normalized to `Error`.
+   * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
+   * @throws {Error} When a permanent error occurs, or retries are exhausted.
+   *   Intentional `Error` subclasses (for example `RangeError`) are rethrown unchanged; other rejections are normalized to `Error` with `cause`.
    */
   private async fetchPageWithRetry<T>(
     queryExecutionId: string,
@@ -551,23 +561,43 @@ export class AthenaQueryResultCollector {
   /**
    * Returns whether `error` represents an abort/cancellation (not a page-fetch failure).
    *
+   * Uses the AbortSignal ecosystem convention `error.name === 'AbortError'` rather than
+   * `instanceof Error`, because host objects such as `DOMException` may fail `instanceof`
+   * checks across Jest VM realms.
+   *
    * @param error - Rejected or thrown value.
    */
   private isAbortError(error: unknown): boolean {
-    return error instanceof Error && error.name === 'AbortError';
+    if (typeof error !== 'object' || error === null) {
+      return false;
+    }
+
+    return (error as { name?: unknown }).name === 'AbortError';
   }
 
   /**
    * Converts an unknown rejection into an `Error` without losing intentional subclasses.
    *
-   * Existing `Error` instances (including `RangeError`, `TypeError`, and `AbortError`) are
-   * returned as-is. Other values are wrapped in `Error` with a derived message; non-primitive
-   * values are attached via `Error.cause` when available.
+   * - {@link AthenaQueryResultCollectorError} instances are returned as-is.
+   * - AbortSignal-style errors (`error.name === 'AbortError'`, including `DOMException`) are
+   *   wrapped as {@link AthenaQueryResultCollectorAbortError} with the original value in `cause`, so callers can
+   *   use both `instanceof AthenaQueryResultCollectorError` and `error.name === 'AbortError'`.
+   * - Other existing `Error` instances (pager/parser `RangeError`, AWS SDK errors, and similar)
+   *   are returned as-is so original `instanceof` checks keep working.
+   * - Non-`Error` values are wrapped in `Error` with a derived message and `Error.cause`.
    *
    * @param error - Rejected or thrown value from the pager or AWS SDK.
    * @returns An `Error` suitable for rethrowing to callers.
    */
   private normalizeError(error: unknown): Error {
+    if (error instanceof AthenaQueryResultCollectorError) {
+      return error;
+    }
+
+    if (this.isAbortError(error)) {
+      return new AthenaQueryResultCollectorAbortError(this.extractErrorMessage(error), { cause: error });
+    }
+
     if (error instanceof Error) {
       return error;
     }
@@ -635,9 +665,9 @@ export class AthenaQueryResultCollector {
   }
 
   /**
-   * Throws an `AbortError` when {@link CollectorOptions.signal} has aborted.
+   * Throws a {@link AthenaQueryResultCollectorAbortError} when {@link CollectorOptions.signal} has aborted.
    *
-   * @throws {Error} With name `AbortError` when the signal is aborted.
+   * @throws {AthenaQueryResultCollectorAbortError} With `name === 'AbortError'` when the signal is aborted.
    */
   private throwIfAborted(): void {
     if (!this.signal) {
@@ -652,26 +682,29 @@ export class AthenaQueryResultCollector {
   }
 
   /**
-   * Builds an `AbortError` from {@link CollectorOptions.signal} reason when present.
+   * Builds a {@link AthenaQueryResultCollectorAbortError} from {@link CollectorOptions.signal} reason when present.
    *
-   * Uses `DOMException` on runtimes that provide it; otherwise sets `Error.name` to `AbortError`.
+   * `name` is `AbortError` for AbortSignal ecosystem compatibility. The signal reason is
+   * attached as `cause` when it is not already represented by the message alone.
    *
    * @returns An error suitable for rejection when collection is cancelled.
    */
-  private createAbortError(): Error {
-    const message = this.signal?.reason instanceof Error
-      ? this.signal.reason.message
-      : typeof this.signal?.reason === 'string'
-        ? this.signal.reason
-        : 'Aborted';
+  private createAbortError(): AthenaQueryResultCollectorAbortError {
+    const reason = this.signal?.reason;
 
-    if (typeof DOMException !== 'undefined') {
-      return new DOMException(message, 'AbortError');
+    if (reason instanceof Error) {
+      return new AthenaQueryResultCollectorAbortError(reason.message, { cause: reason });
     }
 
-    const error = new Error(message);
-    (error as unknown as { name: string }).name = 'AbortError';
-    return error;
+    if (typeof reason === 'string') {
+      return new AthenaQueryResultCollectorAbortError(reason);
+    }
+
+    if (reason !== undefined) {
+      return new AthenaQueryResultCollectorAbortError('Aborted', { cause: reason });
+    }
+
+    return new AthenaQueryResultCollectorAbortError('Aborted');
   }
 
   /**
@@ -682,8 +715,8 @@ export class AthenaQueryResultCollector {
    *
    * @typeParam T - Resolved value type of `promise`.
    * @param promise - Operation to await (for example `fetchPageWith`).
-   * @returns `promise` result, or rejects with `AbortError` if aborted first.
-   * @throws {Error} With name `AbortError` when the signal aborts before `promise` settles.
+   * @returns `promise` result, or rejects with {@link AthenaQueryResultCollectorAbortError} if aborted first.
+   * @throws {AthenaQueryResultCollectorAbortError} With `name === 'AbortError'` when the signal aborts before `promise` settles.
    */
   private raceWithAbort<T>(promise: Promise<T>): Promise<T> {
     if (!this.signal) {
@@ -724,7 +757,7 @@ export class AthenaQueryResultCollector {
    * Waits for `ms` milliseconds, rejecting early when {@link CollectorOptions.signal} aborts.
    *
    * @param ms - Backoff duration between retry attempts.
-   * @throws {Error} With name `AbortError` when the signal aborts during the wait.
+   * @throws {AthenaQueryResultCollectorAbortError} With `name === 'AbortError'` when the signal aborts during the wait.
    */
   private sleep(ms: number): Promise<void> {
     if (!this.signal) {
@@ -777,6 +810,13 @@ export class AthenaQueryResultCollector {
     return this.pager;
   }
 }
+
+export {
+  AthenaQueryResultCollectorError,
+  AthenaQueryResultCollectorAbortError,
+  AthenaQueryResultCollectorConcurrentUseError,
+  type CollectorErrorOptions,
+} from './errors';
 
 /** Re-exports pager and parser types from `athena-query-result-pager`. */
 export type {
