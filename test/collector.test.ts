@@ -1,6 +1,11 @@
 import { AthenaQueryResultPager } from 'athena-query-result-pager';
-import { AthenaQueryResultCollector } from '../src';
-import type { PageResult } from '../src';
+import {
+  AthenaQueryResultCollector,
+  AthenaQueryResultCollectorError,
+  AthenaQueryResultCollectorAbortError,
+  AthenaQueryResultCollectorConcurrentUseError,
+  type PageResult,
+} from '../src';
 
 const mockFetchPageWith = jest.fn();
 const mockReset = jest.fn();
@@ -550,7 +555,11 @@ describe('AthenaQueryResultCollector', () => {
 
       const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3 });
 
-      await expect(collector.collect(queryExecutionId)).rejects.toBe(rangeError);
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBe(rangeError);
+      expect(error).toBeInstanceOf(RangeError);
+      expect(error).not.toBeInstanceOf(AthenaQueryResultCollectorError);
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
 
@@ -587,7 +596,12 @@ describe('AthenaQueryResultCollector', () => {
 
       const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
 
-      await expect(collector.collect(queryExecutionId)).rejects.toMatchObject({ name: 'AbortError' });
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorAbortError);
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorError);
+      expect((error as AthenaQueryResultCollectorAbortError).name).toBe('AbortError');
+      expect((error as AthenaQueryResultCollectorAbortError).code).toBe('ABORT');
       expect(mockFetchPageWith).not.toHaveBeenCalled();
     });
 
@@ -679,9 +693,12 @@ describe('AthenaQueryResultCollector', () => {
       const first = collector.collect(queryExecutionId);
       await Promise.resolve();
 
-      await expect(collector.collect('other-id')).rejects.toMatchObject({
-        name: 'CollectorConcurrentUseError',
-      });
+      const error = await collector.collect('other-id').catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorConcurrentUseError);
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorError);
+      expect((error as AthenaQueryResultCollectorConcurrentUseError).name).toBe('AthenaQueryResultCollectorConcurrentUseError');
+      expect((error as AthenaQueryResultCollectorConcurrentUseError).code).toBe('CONCURRENT_USE');
 
       resolveFetch({ rows: [], rowCount: 0 });
       await first;
@@ -701,7 +718,7 @@ describe('AthenaQueryResultCollector', () => {
 
       const stream = collector.stream('other-id', (row) => row);
       await expect(stream.next()).rejects.toMatchObject({
-        name: 'CollectorConcurrentUseError',
+        name: 'AthenaQueryResultCollectorConcurrentUseError',
       });
 
       resolveFetch({ rows: [], rowCount: 0 });
@@ -722,7 +739,7 @@ describe('AthenaQueryResultCollector', () => {
       await expect(
         collector.processBatches(queryExecutionId, (row) => row, jest.fn()),
       ).rejects.toMatchObject({
-        name: 'CollectorConcurrentUseError',
+        name: 'AthenaQueryResultCollectorConcurrentUseError',
       });
 
       await stream.return(undefined);
@@ -839,7 +856,41 @@ describe('AthenaQueryResultCollector', () => {
 
       const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3, retryDelayMs: 1 });
 
-      await expect(collector.collect(queryExecutionId)).rejects.toMatchObject({ name: 'AbortError' });
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorAbortError);
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorError);
+      expect((error as AthenaQueryResultCollectorAbortError).name).toBe('AbortError');
+      expect((error as AthenaQueryResultCollectorAbortError).cause).toBe(abortError);
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+    });
+
+    it('should wrap DOMException AbortError as AthenaQueryResultCollectorAbortError without losing the original', async () => {
+      const abortError = new DOMException('The operation was aborted.', 'AbortError');
+
+      mockFetchPageWith.mockRejectedValueOnce(abortError);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3, retryDelayMs: 1 });
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorAbortError);
+      expect((error as AthenaQueryResultCollectorAbortError).name).toBe('AbortError');
+      expect((error as AthenaQueryResultCollectorAbortError).message).toBe('The operation was aborted.');
+      expect((error as AthenaQueryResultCollectorAbortError).cause).toBe(abortError);
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+    });
+
+    it('should pass through AthenaQueryResultCollectorAbortError from fetchPageWith without wrapping again', async () => {
+      const abortError = new AthenaQueryResultCollectorAbortError('already aborted');
+
+      mockFetchPageWith.mockRejectedValueOnce(abortError);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3, retryDelayMs: 1 });
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBe(abortError);
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
 
@@ -850,8 +901,9 @@ describe('AthenaQueryResultCollector', () => {
       const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
 
       const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
-      expect((error as Error).name).toBe('AbortError');
-      expect((error as Error).message).toBe('user cancelled');
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorAbortError);
+      expect((error as AthenaQueryResultCollectorAbortError).name).toBe('AbortError');
+      expect((error as AthenaQueryResultCollectorAbortError).message).toBe('user cancelled');
     });
 
     it('should use Error reason from AbortSignal in AbortError message', async () => {
@@ -861,8 +913,23 @@ describe('AthenaQueryResultCollector', () => {
       const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
 
       const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
-      expect((error as Error).name).toBe('AbortError');
-      expect((error as Error).message).toBe('timeout exceeded');
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorAbortError);
+      expect((error as AthenaQueryResultCollectorAbortError).name).toBe('AbortError');
+      expect((error as AthenaQueryResultCollectorAbortError).message).toBe('timeout exceeded');
+      expect((error as AthenaQueryResultCollectorAbortError).cause).toBeInstanceOf(Error);
+    });
+
+    it('should keep a non-string abort reason as cause', async () => {
+      const controller = new AbortController();
+      const reason = { code: 'CANCELLED' };
+      controller.abort(reason);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorAbortError);
+      expect((error as AthenaQueryResultCollectorAbortError).message).toBe('Aborted');
+      expect((error as AthenaQueryResultCollectorAbortError).cause).toEqual(reason);
     });
 
     it('should reject immediately in raceWithAbort when signal is already aborted', async () => {
