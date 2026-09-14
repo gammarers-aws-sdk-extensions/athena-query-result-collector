@@ -16,7 +16,13 @@ import { hasMorePages } from './page-predicates';
  */
 export interface CollectorOptions extends PagerOptions {
   /**
-   * Maximum number of rows to collect or process.
+   * Maximum number of rows to collect or process across **all pages**.
+   *
+   * This is a collector-level cumulative cap for {@link AthenaQueryResultCollector.collect},
+   * {@link AthenaQueryResultCollector.stream}, and {@link AthenaQueryResultCollector.processBatches}.
+   * It is **not** the pager/parser `maxRows` option, which limits rows inside a single Athena
+   * `ResultSet` (one page).
+   *
    * @defaultValue Unlimited when omitted.
    */
   maxRows?: number;

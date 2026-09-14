@@ -14,7 +14,7 @@ It supports full collection, streaming, and page-based batch processing, and it 
 - Transform rows with a custom parser using `collectWith()` — **also accumulates every row in memory**
 - Stream rows lazily with `stream()` as an `AsyncGenerator` (memory-efficient for large results)
 - Process rows per page using `processBatches()` without buffering the full result set
-- Limit output with `maxRows` (strictly enforced for collection, streaming, and batch processing)
+- Limit output with collector `maxRows` (cumulative across all pages; distinct from pager/parser `maxRows`, which caps one `ResultSet`)
 - Invoke an `onPage` callback after each page in `collect()` / `collectWith()` for progress reporting
 - Forward pager settings (`maxResults`, `queryResultType`, `parseResultSetOptions`) while keeping collector-only options separate
 - Retry transient page-fetch failures only (throttling, 5xx, timeouts) with `retryCount` / `retryDelayMs` (permanent errors fail fast)
@@ -172,7 +172,8 @@ const decision = collector.getPager().getLastHeaderRowDecision();
 console.log(decision);
 ```
 
-Collector-only options (`maxRows`, `onPage`, `retryCount`, `retryDelayMs`, `signal`) are **not** passed to the internal pager.
+Collector-only options (`maxRows`, `onPage`, `retryCount`, `retryDelayMs`, `signal`) are **not** passed to the internal pager.  
+Collector `maxRows` is a cumulative cap across pages; pager/parser `maxRows` (via `parseResultSetOptions`) applies only to one `ResultSet` (one page).
 
 ### Cancellation (AbortSignal)
 
@@ -262,7 +263,7 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `maxRows` | `number` | Maximum number of rows to collect or process (unlimited if omitted) |
+| `maxRows` | `number` | Cumulative row limit **across all pages** for `collect()` / `stream()` / `processBatches()` (unlimited if omitted). Distinct from pager/parser `maxRows`, which caps rows inside a single Athena `ResultSet` (one page) |
 | `onPage` | `function` | Callback invoked after each fetched page in `collect()` / `collectWith()`; receives the page and cumulative row count |
 | `retryCount` | `number` | Additional attempts after the first page-fetch failure, for transient errors only (default: `0`; invalid/negative values are normalized) |
 | `retryDelayMs` | `number` | Delay in milliseconds between retries; interruptible when `signal` aborts (default: `1000`; invalid/negative values are normalized) |
@@ -274,7 +275,7 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 | --- | --- | --- |
 | `maxResults` | `number` | `MaxResults` per `GetQueryResults` request, integer `1`–`1000` (default: `1000`) |
 | `queryResultType` | `QueryResultType` | Result type forwarded to Athena (default: `DATA_ROWS`) |
-| `parseResultSetOptions` | `ParseResultSetOptions` | Parser options applied on every page (for example `skipHeaderRow`, `columnCountMismatchBehavior`, `headerRowDetectionStrategy`, `unavailableResultBehavior`) |
+| `parseResultSetOptions` | `ParseResultSetOptions` | Parser options applied on every page (for example `skipHeaderRow`, `columnCountMismatchBehavior`, `headerRowDetectionStrategy`, `unavailableResultBehavior`, and parser `maxRows` for one `ResultSet`) |
 
 ### Re-exported types and values
 
