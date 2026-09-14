@@ -6,7 +6,7 @@
 ![node](https://img.shields.io/node/v/athena-query-result-collector)
 
 A TypeScript library for collecting AWS Athena query results via pagination.  
-It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) (^0.5.x) internally.
+It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) (^0.6.x) internally.
 
 ## Features
 
@@ -14,12 +14,13 @@ It supports full collection, streaming, and page-based batch processing, and it 
 - Transform rows with a custom parser using `collectWith()` — **also accumulates every row in memory**
 - Stream rows lazily with `stream()` as an `AsyncGenerator` (memory-efficient for large results)
 - Process rows per page using `processBatches()` without buffering the full result set
-- Limit output with `maxRows` (strictly enforced for collection, streaming, and batch processing)
+- Limit output with collector `maxRows` (cumulative across all pages; distinct from pager/parser `maxRows`, which caps one `ResultSet`)
 - Invoke an `onPage` callback after each page in `collect()` / `collectWith()` for progress reporting
 - Forward pager settings (`maxResults`, `queryResultType`, `parseResultSetOptions`) while keeping collector-only options separate
 - Retry transient page-fetch failures only (throttling, 5xx, timeouts) with `retryCount` / `retryDelayMs` (permanent errors fail fast)
-- Normalize unknown rejections to `Error` while preserving intentional subclasses such as `RangeError` from pager validation
-- Cancel long-running work via `AbortSignal` (`CollectorOptions.signal`): stop pagination loops, reject pending page-fetch waits, and interrupt retry backoff sleep (throws `AbortError`)
+- Normalize unknown rejections to `Error` while preserving intentional subclasses such as `AthenaQueryResultPagerError` from pager validation (`instanceof` is kept; originals are not wrapped)
+- Typed collector errors via `AthenaQueryResultCollectorError` (`AthenaQueryResultCollectorConcurrentUseError`, `AthenaQueryResultCollectorAbortError` with `name === 'AbortError'`)
+- Cancel long-running work via `AbortSignal` (`CollectorOptions.signal`): stop pagination loops, reject pending page-fetch waits, and interrupt retry backoff sleep (throws `AthenaQueryResultCollectorAbortError`)
 - Access the underlying pager via `getPager()` for advanced pagination, header-row diagnostics, or pager iterators (`iterateRows` / `iteratePages`)
 
 ## Choosing an API (memory)
@@ -27,8 +28,8 @@ It supports full collection, streaming, and page-based batch processing, and it 
 | API | Memory behavior | Use when |
 | --- | --- | --- |
 | `collect()` / `collectWith()` | Accumulates **all** rows into one array; large results can **OOM** | Small-to-moderate results that must fit in memory, or when you need aggregated metadata (`totalRows`, `pageCount`, `truncated`) |
-| `stream()` | Yields one row at a time via pager `iterateRows`; only the current page is retained | Large result sets consumed row-by-row |
-| `processBatches()` | Passes one page at a time via pager `iteratePagesWith`; does not accumulate all rows | Large result sets written or forwarded in page-sized chunks |
+| `stream()` | Yields one row at a time from collector-paginated pages; only the current page is retained | Large result sets consumed row-by-row |
+| `processBatches()` | Passes one collector-paginated page at a time; does not accumulate all rows | Large result sets written or forwarded in page-sized chunks |
 | `getPager().iterateRows()` / `iteratePages()` / `iteratePagesWith()` | Same paging model as the pager (no full-set buffer); collector options are **not** applied | Lower-level control without collector retries/limits |
 
 Prefer `stream()`, `processBatches()`, or the pager iterators for huge Athena result sets. Use `collect()` / `collectWith()` only when the full set is known to fit comfortably in memory (or bound it with `maxRows`).
@@ -39,8 +40,8 @@ One `AthenaQueryResultCollector` is intended for **serial** use:
 
 - Do **not** overlap `collect()` / `collectWith()`, `stream()`, or `processBatches()` on the same instance.
 - The internal pager keeps parser state (for example header-row bookkeeping). Each collector method calls `pager.reset()` before a new execution, but concurrent calls can corrupt that state.
-- Starting a second operation while one is in flight throws `CollectorConcurrentUseError`. For parallel queries, create one collector per execution (sharing the same `AthenaClient` is fine).
-- If you use `getPager()` directly, do not overlap pager iteration with collector methods on the same instance. The pager auto-resets parser state when `queryExecutionId` changes (see [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) 0.5+).
+- Starting a second operation while one is in flight throws `AthenaQueryResultCollectorConcurrentUseError`. For parallel queries, create one collector per execution (sharing the same `AthenaClient` is fine).
+- If you use `getPager()` directly, do not overlap pager iteration with collector methods on the same instance. The pager auto-resets parser state when `queryExecutionId` changes (see [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) 0.6.x).
 
 ```typescript
 // Parallel work: separate collectors, shared client
@@ -58,7 +59,7 @@ await Promise.all([
 - Node.js >= 20.0.0
 - AWS Athena access configured for your runtime (credentials/region)
 - Runtime dependency: `@aws-sdk/client-athena` (pass an `AthenaClient` instance to the collector)
-- Bundled dependency: `athena-query-result-pager` ^0.5.x (installed automatically with this package)
+- Bundled dependency: `athena-query-result-pager` ^0.6.x (installed automatically with this package)
 
 ## Installation
 
@@ -109,7 +110,7 @@ const result = await collector.collectWith(
 ### Streaming (AsyncGenerator)
 
 Memory-efficient alternative to `collect()` / `collectWith()` for large results.  
-Internally delegates to the pager's `iterateRows()` and adds `maxRows`, retries, and `signal` handling.
+Paginates like the pager's `iterateRows()` (fetch pages until there is no `nextToken`) and adds `maxRows`, retries, and `signal` handling.
 
 ```typescript
 for await (const row of collector.stream('query-execution-id', (row) => row)) {
@@ -120,7 +121,7 @@ for await (const row of collector.stream('query-execution-id', (row) => row)) {
 ### Batch processing
 
 Processes one page at a time without buffering the full result set.  
-Internally delegates to the pager's `iteratePagesWith()` and adds `maxRows`, retries, and `signal` handling.
+Paginates like the pager's `iteratePagesWith()` (fetch pages until there is no `nextToken`) and adds `maxRows`, retries, and `signal` handling.
 
 ```typescript
 await collector.processBatches(
@@ -171,7 +172,8 @@ const decision = collector.getPager().getLastHeaderRowDecision();
 console.log(decision);
 ```
 
-Collector-only options (`maxRows`, `onPage`, `retryCount`, `retryDelayMs`, `signal`) are **not** passed to the internal pager.
+Collector-only options (`maxRows`, `onPage`, `retryCount`, `retryDelayMs`, `signal`) are **not** passed to the internal pager.  
+Collector `maxRows` is a cumulative cap across pages; pager/parser `maxRows` (via `parseResultSetOptions`) applies only to one `ResultSet` (one page).
 
 ### Cancellation (AbortSignal)
 
@@ -182,7 +184,7 @@ When aborted, the collector:
 - rejects waits for in-flight page fetches
 - interrupts delay between retry attempts
 
-It then throws an `AbortError` (`DOMException` on runtimes that provide it).  
+It then throws `AthenaQueryResultCollectorAbortError` (`name === 'AbortError'`, so AbortSignal-style checks keep working).  
 In-flight HTTP requests are not cancelled unless the underlying pager or AWS SDK client honors the same signal.
 
 ```typescript
@@ -200,7 +202,7 @@ setTimeout(() => controller.abort(), 5_000);
 try {
   await collector.collect('query-execution-id');
 } catch (error) {
-  if (error instanceof Error && error.name === 'AbortError') {
+  if (error instanceof AthenaQueryResultCollectorAbortError || (error instanceof Error && error.name === 'AbortError')) {
     console.log('collection cancelled');
   } else {
     throw error;
@@ -212,28 +214,40 @@ Cancellation also applies to `stream()` and `processBatches()`.
 
 ### Error handling
 
-Page-fetch failures are rethrown as `Error` instances suitable for caller-side handling:
+Collector-originated failures extend `AthenaQueryResultCollectorError` and expose a stable `code`:
 
-- Existing `Error` subclasses (for example `RangeError` from invalid `maxResults` at construction time, AWS SDK service errors) are **rethrown unchanged**
-- String or plain-object rejections are wrapped in `Error` with a derived message; non-primitive values are attached via `Error.cause` when available
-- `AbortError` is never retried
-- Overlapping `collect()` / `collectWith()`, `stream()`, or `processBatches()` on the same instance throws `CollectorConcurrentUseError`
+| Class | `code` | `name` | When |
+| --- | --- | --- | --- |
+| `AthenaQueryResultCollectorConcurrentUseError` | `CONCURRENT_USE` | `AthenaQueryResultCollectorConcurrentUseError` | A second `collect` / `stream` / `processBatches` starts on a busy instance |
+| `AthenaQueryResultCollectorAbortError` | `ABORT` | `AbortError` | `CollectorOptions.signal` aborts, or an upstream abort (`name === 'AbortError'`) is normalized |
+
+Page-fetch failures from the pager, parser, or AWS SDK are **not** forced into this hierarchy:
+
+- Existing `Error` subclasses (for example `AthenaQueryResultPagerInvalidMaxResultsError` from invalid `maxResults`, parser errors, AWS SDK service errors) are **rethrown unchanged** so original `instanceof` checks keep working
+- AbortSignal-style errors (`error.name === 'AbortError'`, including `DOMException`) are wrapped as `AthenaQueryResultCollectorAbortError` with the original value in `Error.cause`
+- String or plain-object rejections are wrapped in `Error` with a derived message; non-primitive values are attached via `Error.cause`
+- `AthenaQueryResultCollectorAbortError` / `AbortError` is never retried
+- Overlapping `collect()` / `collectWith()`, `stream()`, or `processBatches()` on the same instance throws `AthenaQueryResultCollectorConcurrentUseError`
 
 ```typescript
 try {
   await collector.collect('query-execution-id');
 } catch (error) {
-  if (error instanceof RangeError) {
+  if (error instanceof AthenaQueryResultPagerInvalidMaxResultsError) {
     // pager option validation (e.g. invalid maxResults)
     throw error;
   }
 
-  if (error instanceof Error && error.name === 'AbortError') {
+  if (error instanceof AthenaQueryResultCollectorAbortError || (error instanceof Error && error.name === 'AbortError')) {
     return;
   }
 
-  if (error instanceof Error && (error as Error & { cause?: unknown }).cause) {
-    console.error('wrapped rejection', (error as Error & { cause?: unknown }).cause);
+  if (error instanceof AthenaQueryResultCollectorConcurrentUseError) {
+    throw error;
+  }
+
+  if (error instanceof Error && error.cause) {
+    console.error('wrapped rejection', error.cause);
   }
 
   throw error;
@@ -242,18 +256,18 @@ try {
 
 ## Options
 
-`CollectorOptions` extends `PagerOptions` from `athena-query-result-pager` 0.5.x.  
+`CollectorOptions` extends `PagerOptions` from `athena-query-result-pager` 0.6.x.  
 Only pager fields are forwarded to the internal `AthenaQueryResultPager` instance.
 
 ### Collector options
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `maxRows` | `number` | Maximum number of rows to collect or process (unlimited if omitted) |
+| `maxRows` | `number` | Cumulative row limit **across all pages** for `collect()` / `stream()` / `processBatches()` (unlimited if omitted). Distinct from pager/parser `maxRows`, which caps rows inside a single Athena `ResultSet` (one page) |
 | `onPage` | `function` | Callback invoked after each fetched page in `collect()` / `collectWith()`; receives the page and cumulative row count |
 | `retryCount` | `number` | Additional attempts after the first page-fetch failure, for transient errors only (default: `0`; invalid/negative values are normalized) |
 | `retryDelayMs` | `number` | Delay in milliseconds between retries; interruptible when `signal` aborts (default: `1000`; invalid/negative values are normalized) |
-| `signal` | `AbortSignal` | Cancel collection/streaming/batch loops, pending page-fetch waits, and retry backoff sleep (throws `AbortError` when aborted) |
+| `signal` | `AbortSignal` | Cancel collection/streaming/batch loops, pending page-fetch waits, and retry backoff sleep (throws `AthenaQueryResultCollectorAbortError` with `name === 'AbortError'` when aborted) |
 
 ### Pager options (forwarded to `athena-query-result-pager`)
 
@@ -261,11 +275,11 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 | --- | --- | --- |
 | `maxResults` | `number` | `MaxResults` per `GetQueryResults` request, integer `1`–`1000` (default: `1000`) |
 | `queryResultType` | `QueryResultType` | Result type forwarded to Athena (default: `DATA_ROWS`) |
-| `parseResultSetOptions` | `ParseResultSetOptions` | Parser options applied on every page (for example `skipHeaderRow`, `columnCountMismatchBehavior`, `headerRowDetectionStrategy`, `unavailableResultBehavior`) |
+| `parseResultSetOptions` | `ParseResultSetOptions` | Parser options applied on every page (for example `skipHeaderRow`, `columnCountMismatchBehavior`, `headerRowDetectionStrategy`, `unavailableResultBehavior`, parser `maxRows` / `maxRowsExceededBehavior` for one `ResultSet`) |
 
 ### Re-exported types and values
 
-The package re-exports `ParsedRow`, `RowParser`, `PageResult`, `PagerOptions`, `ParseResultSetOptions`, `HeaderRowDecision`, and `QueryResultType`.
+The package re-exports `ParsedRow`, `RowParser`, `PageResult`, `PagerOptions`, `ParseResultSetOptions`, `HeaderRowDecision`, and `QueryResultType`, plus collector errors `AthenaQueryResultCollectorError`, `AthenaQueryResultCollectorConcurrentUseError`, and `AthenaQueryResultCollectorAbortError`, and pager errors `AthenaQueryResultPagerError`, `AthenaQueryResultPagerInvalidMaxResultsError`, and `AthenaQueryResultPagerEmptyQueryExecutionIdError`.
 
 ## License
 
