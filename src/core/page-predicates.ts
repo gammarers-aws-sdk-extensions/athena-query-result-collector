@@ -5,6 +5,7 @@
  * `undefined` and `''` both mean pagination is finished.
  *
  * @param nextToken - Continuation token from the last fetched page, if any.
+ * @returns `true` when `nextToken` is a non-empty string.
  */
 export const hasMorePages = (nextToken: string | undefined): boolean => {
   if (typeof nextToken !== 'string') {

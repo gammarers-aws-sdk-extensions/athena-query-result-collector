@@ -1,3 +1,4 @@
+import { AthenaClient } from '@aws-sdk/client-athena';
 import { AthenaQueryResultPager } from 'athena-query-result-pager';
 import {
   AthenaQueryResultCollector,
@@ -58,7 +59,7 @@ jest.mock('athena-query-result-pager', () => {
 });
 
 describe('AthenaQueryResultCollector', () => {
-  const mockClient = {} as any;
+  const mockClient = {} as AthenaClient;
   const queryExecutionId = 'query-id-123';
 
   beforeEach(() => {
@@ -75,7 +76,7 @@ describe('AthenaQueryResultCollector', () => {
       expect(collector.getPager()).toBeDefined();
     });
 
-    it('should use default retryCount=0 and retryDelayMs=1000 when options are omitted', async () => {
+    it('should collect when options are omitted', async () => {
       const collector = new AthenaQueryResultCollector(mockClient);
       mockFetchPageWith.mockResolvedValue({ rows: [], rowCount: 0 });
       mockReset.mockImplementation(() => {});
@@ -91,7 +92,6 @@ describe('AthenaQueryResultCollector', () => {
         maxResults: 500,
         parseResultSetOptions,
         maxRows: 100,
-        retryCount: 2,
         signal,
       });
 
@@ -374,192 +374,13 @@ describe('AthenaQueryResultCollector', () => {
     });
   });
 
-  describe('retry', () => {
-    it('should retry after fetchPageWith failure and succeed', async () => {
-      const timeoutError = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
-
-      mockFetchPageWith
-        .mockRejectedValueOnce(timeoutError)
-        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 } as PageResult<any>);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 1,
-        retryDelayMs: 10,
-      });
-      const result = await collector.collect(queryExecutionId);
-
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
-      expect(result.rows).toEqual([{ ok: true }]);
-      expect(result.totalRows).toBe(1);
-    });
-
-    it('should retry on HTTP 429 (throttling)', async () => {
-      const tooManyRequests = Object.assign(new Error('TooManyRequests'), {
-        name: 'TooManyRequestsException',
-        $metadata: { httpStatusCode: 429 },
-      });
-
-      mockFetchPageWith
-        .mockRejectedValueOnce(tooManyRequests)
-        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 } as PageResult<any>);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 1,
-        retryDelayMs: 1,
-      });
-
-      const result = await collector.collect(queryExecutionId);
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
-      expect(result.rows).toEqual([{ ok: true }]);
-    });
-
-    it('should retry when Smithy retry hint is present ($retryable)', async () => {
-      const retryable = Object.assign(new Error('retryable'), {
-        $retryable: { throttling: true },
-      });
-
-      mockFetchPageWith
-        .mockRejectedValueOnce(retryable)
-        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 } as PageResult<any>);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 1,
-        retryDelayMs: 1,
-      });
-
-      const result = await collector.collect(queryExecutionId);
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
-      expect(result.rows).toEqual([{ ok: true }]);
-    });
-
-    it('should retry on throttling error codes without HTTP metadata', async () => {
-      const throttled = {
-        message: 'throttled',
-        Code: 'RequestLimitExceeded',
-      };
-
-      mockFetchPageWith
-        .mockRejectedValueOnce(throttled)
-        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 } as PageResult<any>);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 1,
-        retryDelayMs: 1,
-      });
-
-      const result = await collector.collect(queryExecutionId);
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
-      expect(result.rows).toEqual([{ ok: true }]);
-    });
-
-    it('should retry on timeout identified by name or message', async () => {
-      const timeoutByName = Object.assign(new Error('timed out while reading'), {
-        name: 'TimeoutError',
-      });
-
-      mockFetchPageWith
-        .mockRejectedValueOnce(timeoutByName)
-        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 } as PageResult<any>);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 1,
-        retryDelayMs: 1,
-      });
-
-      const result = await collector.collect(queryExecutionId);
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
-      expect(result.rows).toEqual([{ ok: true }]);
-    });
-
-    it('should retry on timeout identified by message only', async () => {
-      const timeoutByMessage = { message: 'Operation timed out' };
-
-      mockFetchPageWith
-        .mockRejectedValueOnce(timeoutByMessage)
-        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 } as PageResult<any>);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 1,
-        retryDelayMs: 1,
-      });
-
-      const result = await collector.collect(queryExecutionId);
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
-      expect(result.rows).toEqual([{ ok: true }]);
-    });
-
-    it('should not retry on permanent errors (e.g. 403 AccessDenied)', async () => {
-      const accessDenied = Object.assign(new Error('AccessDenied'), {
-        name: 'AccessDeniedException',
-        $metadata: { httpStatusCode: 403 },
-      });
-
-      mockFetchPageWith.mockRejectedValue(accessDenied);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 3,
-        retryDelayMs: 1,
-      });
-
-      await expect(collector.collect(queryExecutionId)).rejects.toThrow('AccessDenied');
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
-    });
-
-    it('should retry on transient HTTP errors (e.g. 500)', async () => {
-      const internalError = Object.assign(new Error('InternalError'), {
-        name: 'InternalServerException',
-        $metadata: { httpStatusCode: 500 },
-      });
-
-      mockFetchPageWith
-        .mockRejectedValueOnce(internalError)
-        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 } as PageResult<any>);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 2,
-        retryDelayMs: 1,
-      });
-
-      const result = await collector.collect(queryExecutionId);
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
-      expect(result.rows).toEqual([{ ok: true }]);
-    });
-
-    it('should throw the last error when retryCount is exceeded', async () => {
-      const internalError = Object.assign(new Error('InternalError'), {
-        name: 'InternalServerException',
-        $metadata: { httpStatusCode: 500 },
-      });
-
-      mockFetchPageWith.mockRejectedValue(internalError);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 2,
-        retryDelayMs: 1,
-      });
-
-      await expect(collector.collect(queryExecutionId)).rejects.toThrow('InternalError');
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(3);
-    });
-
-    it('should normalize invalid retry options and never throw undefined', async () => {
-      mockFetchPageWith.mockRejectedValue(new Error('invalid retry options'));
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: -1,
-        retryDelayMs: Number.NaN,
-      });
-
-      await expect(collector.collect(queryExecutionId)).rejects.toThrow('invalid retry options');
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
-    });
-
+  describe('page fetch errors', () => {
     it('should rethrow AthenaQueryResultPagerInvalidMaxResultsError from pager without wrapping', async () => {
       const pagerError = new AthenaQueryResultPagerInvalidMaxResultsError(1001);
 
       mockFetchPageWith.mockRejectedValueOnce(pagerError);
 
-      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3 });
+      const collector = new AthenaQueryResultCollector(mockClient);
 
       const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
 
@@ -592,7 +413,21 @@ describe('AthenaQueryResultCollector', () => {
 
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe('validation failed');
-      expect((error as Error & { cause?: unknown }).cause).toEqual(rejection);
+      expect((error as Error & { cause?: unknown }).cause).toBe(rejection);
+    });
+
+    it('should surface transient API errors from the pager without an application-level retry loop', async () => {
+      const internalError = Object.assign(new Error('InternalError'), {
+        name: 'InternalServerException',
+        $metadata: { httpStatusCode: 500 },
+      });
+
+      mockFetchPageWith.mockRejectedValue(internalError);
+
+      const collector = new AthenaQueryResultCollector(mockClient);
+
+      await expect(collector.collect(queryExecutionId)).rejects.toThrow('InternalError');
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -633,26 +468,6 @@ describe('AthenaQueryResultCollector', () => {
       resolveFetch({ rows: [{ id: 1 }], rowCount: 1 });
     });
 
-    it('should abort during retry delay sleep and not call fetchPageWith again', async () => {
-      const controller = new AbortController();
-
-      const transient = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
-      mockFetchPageWith.mockRejectedValueOnce(transient);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 3,
-        retryDelayMs: 10_000,
-        signal: controller.signal,
-      });
-
-      const promise = collector.collect(queryExecutionId);
-      // Ensure the first attempt has started and moved into sleep.
-      await Promise.resolve();
-      controller.abort();
-
-      await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
-    });
 
     it('should abort during stream iteration', async () => {
       const controller = new AbortController();
@@ -855,13 +670,13 @@ describe('AthenaQueryResultCollector', () => {
   });
 
   describe('abort edge cases', () => {
-    it('should rethrow AbortError from fetchPageWith without retrying', async () => {
+    it('should wrap AbortError from fetchPageWith as AthenaQueryResultCollectorAbortError', async () => {
       const abortError = new Error('Aborted');
       abortError.name = 'AbortError';
 
       mockFetchPageWith.mockRejectedValueOnce(abortError);
 
-      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3, retryDelayMs: 1 });
+      const collector = new AthenaQueryResultCollector(mockClient);
 
       const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
 
@@ -877,7 +692,7 @@ describe('AthenaQueryResultCollector', () => {
 
       mockFetchPageWith.mockRejectedValueOnce(abortError);
 
-      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3, retryDelayMs: 1 });
+      const collector = new AthenaQueryResultCollector(mockClient);
 
       const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
 
@@ -893,7 +708,7 @@ describe('AthenaQueryResultCollector', () => {
 
       mockFetchPageWith.mockRejectedValueOnce(abortError);
 
-      const collector = new AthenaQueryResultCollector(mockClient, { retryCount: 3, retryDelayMs: 1 });
+      const collector = new AthenaQueryResultCollector(mockClient);
 
       const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
 
@@ -951,49 +766,11 @@ describe('AthenaQueryResultCollector', () => {
 
       const collector = new AthenaQueryResultCollector(mockClient, {
         signal: controller.signal,
-        retryCount: 1,
-        retryDelayMs: 1,
       });
 
       await expect(collector.collect(queryExecutionId)).rejects.toMatchObject({ name: 'AbortError' });
     });
 
-    it('should reject sleep immediately when signal is already aborted', async () => {
-      const controller = new AbortController();
 
-      const transient = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
-      mockFetchPageWith.mockRejectedValue(transient);
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 2,
-        retryDelayMs: 100,
-        signal: controller.signal,
-      });
-
-      const promise = collector.collect(queryExecutionId);
-      await new Promise((r) => setTimeout(r, 10));
-      controller.abort();
-
-      await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
-    });
-
-    it('should complete sleep normally with signal when not aborted', async () => {
-      const controller = new AbortController();
-      const transient = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
-
-      mockFetchPageWith
-        .mockRejectedValueOnce(transient)
-        .mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 });
-
-      const collector = new AthenaQueryResultCollector(mockClient, {
-        retryCount: 1,
-        retryDelayMs: 10,
-        signal: controller.signal,
-      });
-
-      const result = await collector.collect(queryExecutionId);
-      expect(result.rows).toEqual([{ ok: true }]);
-      expect(mockFetchPageWith).toHaveBeenCalledTimes(2);
-    });
   });
 });
