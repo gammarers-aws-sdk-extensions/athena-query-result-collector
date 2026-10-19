@@ -11,8 +11,12 @@ import { hasMorePages } from './page-predicates';
  * Options for {@link AthenaQueryResultCollector}.
  *
  * Extends {@link PagerOptions} from `athena-query-result-pager` (for example `maxResults`,
- * `queryResultType`, and `parseResultSetOptions`), plus collection-specific limits, retries,
+ * `queryResultType`, and `parseResultSetOptions`), plus collection-specific limits,
  * progress callbacks, and cancellation.
+ *
+ * Transient API failures (throttling, 5xx, network errors) are retried by the injected
+ * {@link AthenaClient} (`maxAttempts`, `retryMode`). This collector does not add an
+ * application-level retry loop on top of `GetQueryResults`.
  */
 export interface CollectorOptions extends PagerOptions {
   /**
@@ -35,22 +39,10 @@ export interface CollectorOptions extends PagerOptions {
    */
   onPage?: <T>(page: PageResult<T>, totalCollected: number) => void | Promise<void>;
   /**
-   * Number of additional attempts after the first page-fetch failure.
-   * Only transient errors (throttling, 5xx, timeouts, and similar) are retried.
-   * @defaultValue `0`
-   */
-  retryCount?: number;
-  /**
-   * Delay in milliseconds between retry attempts.
-   * Interruptible when {@link CollectorOptions.signal} aborts.
-   * @defaultValue `1000`
-   */
-  retryDelayMs?: number;
-  /**
    * Optional `AbortSignal` to cancel long-running collection, streaming, or batch processing.
    *
-   * When aborted, the collector stops pagination loops, rejects pending page-fetch waits,
-   * and interrupts retry backoff sleep, then throws {@link AthenaQueryResultCollectorAbortError}
+   * When aborted, the collector stops pagination loops and rejects pending page-fetch waits,
+   * then throws {@link AthenaQueryResultCollectorAbortError}
    * (`name === 'AbortError'` for AbortSignal ecosystem compatibility).
    * In-flight HTTP requests are not cancelled unless the underlying pager or AWS SDK client
    * honors the same signal.
@@ -86,11 +78,14 @@ export interface CollectResult<T> {
  * {@link AthenaQueryResultPager}.
  *
  * Supports full in-memory collection, lazy row streaming, and per-page batch processing,
- * with optional row limits, transient-error retries, and cancellation via {@link AbortSignal}.
+ * with optional row limits and cancellation via {@link AbortSignal}.
+ *
+ * Transient `GetQueryResults` failures are retried by the injected {@link AthenaClient}
+ * (`maxAttempts`, `retryMode`). This class does not wrap page fetches in an extra retry loop.
  *
  * {@link AthenaQueryResultCollector.stream} and {@link AthenaQueryResultCollector.processBatches}
  * paginate like the pager iterators (`iterateRows`, `iteratePagesWith`) by fetching pages through
- * collector retry, abort, and error normalization.
+ * collector abort checks and error normalization.
  *
  * Memory guidance: {@link AthenaQueryResultCollector.collect} and
  * {@link AthenaQueryResultCollector.collectWith} accumulate every row into an array and may
@@ -111,35 +106,24 @@ export class AthenaQueryResultCollector {
 
   private readonly pager: AthenaQueryResultPager;
   private readonly options: CollectorOptions;
-  private readonly retryCount: number;
-  private readonly retryDelayMs: number;
   private readonly signal?: AbortSignal;
   private activeOperation?: 'collect' | 'stream' | 'processBatches';
 
   /**
    * @param client - AWS SDK v3 `AthenaClient` used to fetch query results.
-   * @param options - Collection limits, retries, pager settings, and optional abort signal.
+   * @param options - Collection limits, pager settings, and optional abort signal.
    * @throws {AthenaQueryResultPagerInvalidMaxResultsError} When `maxResults` is not an integer in `1..1000`.
    */
   constructor(client: AthenaClient, options: CollectorOptions = {}) {
-    const retryCount = this.normalizeNonNegativeInteger(options.retryCount, 0);
-    const retryDelayMs = this.normalizeNonNegativeInteger(options.retryDelayMs, 1000);
-
     this.pager = new AthenaQueryResultPager(client, this.toPagerOptions(options));
-    this.retryCount = retryCount;
-    this.retryDelayMs = retryDelayMs;
-    this.options = {
-      ...options,
-      retryCount,
-      retryDelayMs,
-    };
+    this.options = options;
     this.signal = options.signal;
   }
 
   /**
    * Picks pager-only fields from {@link CollectorOptions} for {@link AthenaQueryResultPager}.
    *
-   * Collector-specific options (`maxRows`, `onPage`, retries, `signal`) are not forwarded.
+   * Collector-specific options (`maxRows`, `onPage`, `signal`) are not forwarded.
    *
    * @param options - Full collector options from the constructor.
    */
@@ -185,29 +169,29 @@ export class AthenaQueryResultCollector {
    *
    * Same pagination shape as {@link AthenaQueryResultPager.iteratePagesWith}: fetch a page,
    * yield it, then continue while {@link hasMorePages} is true. Each fetch goes through
-   * {@link AthenaQueryResultCollector.fetchPageWithRetry} so retry, abort, and error
-   * normalization stay on the collector.
+   * {@link AthenaQueryResultCollector.fetchPage} so abort and error normalization stay on
+   * the collector. Transient API retries are left to {@link AthenaClient}.
    *
    * @typeParam T - Output type produced by `rowParser`.
    * @param queryExecutionId - Athena query execution identifier.
    * @param rowParser - Converts each parsed row into `T`.
    * @yields Successive pages in execution order.
    */
-  private async *iteratePagesWithRetry<T>(
+  private async *iteratePages<T>(
     queryExecutionId: string,
     rowParser: RowParser<T>,
   ): AsyncGenerator<PageResult<T>> {
     let nextToken: string | undefined;
 
     do {
-      const page = await this.fetchPageWithRetry(queryExecutionId, rowParser, nextToken);
+      const page = await this.fetchPage(queryExecutionId, rowParser, nextToken);
       yield page;
       nextToken = page.nextToken;
     } while (hasMorePages(nextToken));
   }
 
   /**
-   * Yields rows from {@link AthenaQueryResultCollector.iteratePagesWithRetry} without buffering
+   * Yields rows from {@link AthenaQueryResultCollector.iteratePages} without buffering
    * the full result set.
    *
    * Same shape as {@link AthenaQueryResultPager.iterateRows}.
@@ -217,101 +201,16 @@ export class AthenaQueryResultCollector {
    * @param rowParser - Converts each parsed row into `T`.
    * @yields Successive `T` values in execution order.
    */
-  private async *iterateRowsWithRetry<T>(
+  private async *iterateRows<T>(
     queryExecutionId: string,
     rowParser: RowParser<T>,
   ): AsyncGenerator<T> {
-    for await (const page of this.iteratePagesWithRetry(queryExecutionId, rowParser)) {
+    for await (const page of this.iteratePages(queryExecutionId, rowParser)) {
       for (const row of page.rows) {
         yield row;
       }
     }
   }
-
-  /**
-   * Returns whether a page-fetch error is likely transient and safe to retry.
-   *
-   * Intentionally conservative: authentication, authorization, and validation errors
-   * should fail fast rather than being retried.
-   *
-   * @param error - Rejected or thrown value from the pager or AWS SDK.
-   * @returns `true` for throttling, 5xx, timeout, and similar transient failures.
-   */
-  private readonly isRetryableError = (error: unknown): boolean => {
-    const err = error as any;
-
-    // AWS SDK v3 / Smithy-style metadata (best signal)
-    const httpStatusCode: number | undefined =
-      err?.$metadata?.httpStatusCode ??
-      err?.$response?.httpResponse?.statusCode;
-
-    if (typeof httpStatusCode === 'number') {
-      // Retry only on transient HTTP statuses
-      if (httpStatusCode >= 500) {
-        return true;
-      }
-
-      if (httpStatusCode === 408 || httpStatusCode === 429) {
-        return true;
-      }
-
-      return false;
-    }
-
-    // Smithy retry hints
-    if (err?.$retryable?.throttling === true || err?.$retryable === true) {
-      return true;
-    }
-
-    // Common AWS / HTTP-like error identifiers
-    const nameOrCode: string | undefined =
-      (typeof err?.name === 'string' ? err.name : undefined) ??
-      (typeof err?.Code === 'string' ? err.Code : undefined) ??
-      (typeof err?.code === 'string' ? err.code : undefined);
-
-    const throttlingCodes = new Set<string>([
-      'Throttling',
-      'ThrottlingException',
-      'TooManyRequestsException',
-      'RequestLimitExceeded',
-      'RequestThrottled',
-      'RequestThrottledException',
-      'SlowDown',
-      'ProvisionedThroughputExceededException',
-    ]);
-
-    if (nameOrCode && throttlingCodes.has(nameOrCode)) {
-      return true;
-    }
-
-    // Node/network transient errors
-    const nodeErrorCodes = new Set<string>([
-      'ETIMEDOUT',
-      'ECONNRESET',
-      'EPIPE',
-      'EAI_AGAIN',
-      'ENOTFOUND',
-      'ECONNREFUSED',
-      'EHOSTUNREACH',
-      'ENETUNREACH',
-      'EADDRINUSE',
-    ]);
-
-    if (typeof err?.code === 'string' && nodeErrorCodes.has(err.code)) {
-      return true;
-    }
-
-    const message = typeof err?.message === 'string' ? err.message : '';
-    if (typeof nameOrCode === 'string' && nameOrCode.toLowerCase().includes('timeout')) {
-      return true;
-    }
-
-    if (message.toLowerCase().includes('timeout') || message.toLowerCase().includes('timed out')) {
-      return true;
-    }
-
-    return false;
-  };
 
   /**
    * Collects all rows as dictionary-shaped {@link ParsedRow} objects into a single in-memory array.
@@ -324,7 +223,7 @@ export class AthenaQueryResultCollector {
    * @returns Aggregated rows and collection metadata.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
+   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async collect(queryExecutionId: string): Promise<CollectResult<ParsedRow>> {
     return this.collectWith(queryExecutionId, (row) => row);
@@ -334,8 +233,8 @@ export class AthenaQueryResultCollector {
    * Collects all rows and maps each {@link ParsedRow} through `rowParser` into a single in-memory array.
    *
    * Paginates like {@link AthenaQueryResultPager.iteratePagesWith} via
-   * {@link AthenaQueryResultCollector.iteratePagesWithRetry}, applying collector options
-   * (`maxRows`, `onPage`, retries, `signal`) on each fetched page.
+   * {@link AthenaQueryResultCollector.iteratePages}, applying collector options
+   * (`maxRows`, `onPage`, `signal`) on each fetched page.
    *
    * Accumulates every transformed row before returning. Suitable for small-to-moderate results.
    * Large result sets can exhaust process memory (OOM); prefer
@@ -344,7 +243,7 @@ export class AthenaQueryResultCollector {
    * {@link AthenaQueryResultCollector.getPager}.
    *
    * Respects {@link CollectorOptions.maxRows}, invokes {@link CollectorOptions.onPage} after each page,
-   * and honors {@link CollectorOptions.signal} between pages and during retries.
+   * and honors {@link CollectorOptions.signal} between pages.
    *
    * @typeParam T - Output type produced by `rowParser`.
    * @param queryExecutionId - Athena query execution identifier.
@@ -352,7 +251,7 @@ export class AthenaQueryResultCollector {
    * @returns Aggregated transformed rows and collection metadata.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
+   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async collectWith<T>(
     queryExecutionId: string,
@@ -370,7 +269,7 @@ export class AthenaQueryResultCollector {
 
       this.throwIfAborted();
 
-      for await (const page of this.iteratePagesWithRetry(queryExecutionId, rowParser)) {
+      for await (const page of this.iteratePages(queryExecutionId, rowParser)) {
         this.throwIfAborted();
 
         pageCount++;
@@ -409,9 +308,8 @@ export class AthenaQueryResultCollector {
    * Lazily yields rows one at a time without buffering the full result set in memory.
    *
    * Paginates like {@link AthenaQueryResultPager.iterateRows} via
-   * {@link AthenaQueryResultCollector.iterateRowsWithRetry}, adding
-   * {@link CollectorOptions.maxRows}, transient-error retries, and {@link CollectorOptions.signal}
-   * handling.
+   * {@link AthenaQueryResultCollector.iterateRows}, adding
+   * {@link CollectorOptions.maxRows} and {@link CollectorOptions.signal} handling.
    *
    * Prefer this over {@link AthenaQueryResultCollector.collect} /
    * {@link AthenaQueryResultCollector.collectWith} when the result set may be large.
@@ -426,7 +324,7 @@ export class AthenaQueryResultCollector {
    * @yields Successive `T` values in execution order.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
+   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async *stream<T>(
     queryExecutionId: string,
@@ -441,7 +339,7 @@ export class AthenaQueryResultCollector {
 
       this.throwIfAborted();
 
-      for await (const row of this.iterateRowsWithRetry(queryExecutionId, rowParser)) {
+      for await (const row of this.iterateRows(queryExecutionId, rowParser)) {
         this.throwIfAborted();
         // maxRows check
         if (this.options.maxRows !== undefined && count >= this.options.maxRows) {
@@ -459,9 +357,8 @@ export class AthenaQueryResultCollector {
    * Processes each fetched page through `batchProcessor` without accumulating all rows in memory.
    *
    * Paginates like {@link AthenaQueryResultPager.iteratePagesWith} via
-   * {@link AthenaQueryResultCollector.iteratePagesWithRetry}, adding
-   * {@link CollectorOptions.maxRows}, transient-error retries, and {@link CollectorOptions.signal}
-   * handling.
+   * {@link AthenaQueryResultCollector.iteratePages}, adding
+   * {@link CollectorOptions.maxRows} and {@link CollectorOptions.signal} handling.
    *
    * Prefer this over {@link AthenaQueryResultCollector.collect} /
    * {@link AthenaQueryResultCollector.collectWith} when writing or forwarding page-sized chunks
@@ -477,7 +374,7 @@ export class AthenaQueryResultCollector {
    * @returns Total rows processed and number of pages handled.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails permanently or retries are exhausted. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
+   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async processBatches<T>(
     queryExecutionId: string,
@@ -498,7 +395,7 @@ export class AthenaQueryResultCollector {
 
       this.throwIfAborted();
 
-      for await (const page of this.iteratePagesWithRetry(queryExecutionId, rowParser)) {
+      for await (const page of this.iteratePages(queryExecutionId, rowParser)) {
         this.throwIfAborted();
         if (this.options.maxRows !== undefined && totalRows >= this.options.maxRows) {
           break;
@@ -529,11 +426,10 @@ export class AthenaQueryResultCollector {
   }
 
   /**
-   * Fetches a single results page with transient-error retries and abort awareness.
+   * Fetches a single results page with abort awareness and error normalization.
    *
-   * Checks {@link CollectorOptions.signal} before each attempt, races the in-flight fetch
-   * against abort, and uses interruptible backoff between retries.
-   * Permanent failures (auth, permission, validation) fail fast without retrying.
+   * Checks {@link CollectorOptions.signal} before the fetch and races the in-flight fetch
+   * against abort. Transient API retries are performed by {@link AthenaClient}, not here.
    *
    * @typeParam T - Output type produced by `rowParser`.
    * @param queryExecutionId - Athena query execution identifier.
@@ -541,44 +437,24 @@ export class AthenaQueryResultCollector {
    * @param nextToken - Continuation token; omit on the first page.
    * @returns One page of transformed rows and pagination metadata.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
-   * @throws {Error} When a permanent error occurs, or retries are exhausted.
+   * @throws {Error} When the page fetch fails.
    *   Intentional `Error` subclasses (for example {@link AthenaQueryResultPagerError}, parser errors, `RangeError`)
    *   are rethrown unchanged; other rejections are normalized to `Error` with `cause`.
    */
-  private async fetchPageWithRetry<T>(
+  private async fetchPage<T>(
     queryExecutionId: string,
     rowParser: RowParser<T>,
     nextToken?: string,
   ): Promise<PageResult<T>> {
-    let lastError: Error | undefined;
-
-    for (let attempt = 0; attempt <= this.retryCount; attempt++) {
+    this.throwIfAborted();
+    try {
+      return await this.raceWithAbort(
+        this.pager.fetchPageWith(queryExecutionId, rowParser, nextToken),
+      );
+    } catch (error: unknown) {
       this.throwIfAborted();
-      try {
-        return await this.raceWithAbort(
-          this.pager.fetchPageWith(queryExecutionId, rowParser, nextToken),
-        );
-      } catch (error: unknown) {
-        this.throwIfAborted();
-
-        if (this.isAbortError(error)) {
-          throw this.normalizeError(error);
-        }
-
-        if (!this.isRetryableError(error)) {
-          throw this.normalizeError(error);
-        }
-
-        lastError = this.normalizeError(error);
-
-        if (attempt < this.retryCount) {
-          await this.sleep(this.retryDelayMs);
-          continue;
-        }
-      }
+      throw this.normalizeError(error);
     }
-
-    throw lastError ?? new Error('Failed to fetch page after retries');
   }
 
   /**
@@ -666,25 +542,6 @@ export class AthenaQueryResultCollector {
     } catch {
       return String(error);
     }
-  }
-
-  /**
-   * Normalizes a numeric option to a non-negative integer, falling back when invalid.
-   *
-   * @param value - User-supplied option value.
-   * @param fallback - Default used when `value` is `undefined`, non-finite, `NaN`, or negative.
-   * @returns A floored integer `>= 0`.
-   */
-  private normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
-    if (value === undefined) {
-      return fallback;
-    }
-
-    if (!Number.isFinite(value) || Number.isNaN(value) || value < 0) {
-      return fallback;
-    }
-
-    return Math.floor(value);
   }
 
   /**
@@ -777,49 +634,12 @@ export class AthenaQueryResultCollector {
   }
 
   /**
-   * Waits for `ms` milliseconds, rejecting early when {@link CollectorOptions.signal} aborts.
-   *
-   * @param ms - Backoff duration between retry attempts.
-   * @throws {AthenaQueryResultCollectorAbortError} With `name === 'AbortError'` when the signal aborts during the wait.
-   */
-  private sleep(ms: number): Promise<void> {
-    if (!this.signal) {
-      return new Promise((resolve) => setTimeout(resolve, ms));
-    }
-
-    const signal = this.signal;
-
-    if (signal.aborted) {
-      return Promise.reject(this.createAbortError());
-    }
-
-    return new Promise((resolve, reject) => {
-      const onAbort = () => {
-        cleanup();
-        reject(this.createAbortError());
-      };
-
-      const timeout = setTimeout(() => {
-        cleanup();
-        resolve();
-      }, ms);
-
-      const cleanup = () => {
-        clearTimeout(timeout);
-        signal.removeEventListener('abort', onAbort);
-      };
-
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-  }
-
-  /**
    * Returns the internal {@link AthenaQueryResultPager} for advanced pagination use.
    *
    * For large result sets, call the pager's memory-efficient iterators directly
    * (`iterateRows`, `iteratePages`, `iteratePagesWith`) instead of
    * {@link AthenaQueryResultCollector.collect} / {@link AthenaQueryResultCollector.collectWith}.
-   * Note that collector options such as `maxRows`, `onPage`, retries, and `signal` are not
+   * Note that collector options such as `maxRows`, `onPage`, and `signal` are not
    * applied when you drive the pager yourself.
    *
    * Do not use the pager while a collector operation is in flight on the same instance.
