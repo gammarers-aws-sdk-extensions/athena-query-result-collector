@@ -17,12 +17,13 @@ export interface CollectorErrorOptions {
  * `Error` instances; they are rethrown unchanged so original `instanceof` checks keep working.
  */
 export abstract class AthenaQueryResultCollectorError extends Error {
+  override readonly name: string = 'AthenaQueryResultCollectorError';
   abstract readonly code: string;
   readonly cause?: unknown;
 
-  constructor(message: string, options?: CollectorErrorOptions) {
+  protected constructor(message: string, options?: CollectorErrorOptions) {
     super(message);
-    this.name = new.target.name;
+    Object.setPrototypeOf(this, AthenaQueryResultCollectorError.prototype);
     if (options?.cause !== undefined) {
       this.cause = options.cause;
     }
@@ -34,6 +35,7 @@ export abstract class AthenaQueryResultCollectorError extends Error {
  * on the same {@link AthenaQueryResultCollector} instance.
  */
 export class AthenaQueryResultCollectorConcurrentUseError extends AthenaQueryResultCollectorError {
+  override readonly name: string = 'AthenaQueryResultCollectorConcurrentUseError';
   readonly code = 'CONCURRENT_USE' as const;
 
   /**
@@ -44,18 +46,20 @@ export class AthenaQueryResultCollectorConcurrentUseError extends AthenaQueryRes
       `AthenaQueryResultCollector is already running ${activeOperation}; `
       + 'use one operation at a time per instance or create a separate collector.',
     );
-    this.name = 'AthenaQueryResultCollectorConcurrentUseError';
+    Object.setPrototypeOf(this, AthenaQueryResultCollectorConcurrentUseError.prototype);
   }
 }
 
 /**
  * Thrown when collection is cancelled via {@link AbortSignal}.
  *
- * `name` is always `AbortError` so this remains compatible with AbortSignal ecosystem
- * checks (`error.name === 'AbortError'`), including `DOMException` AbortErrors from
- * other layers that are normalized with the original value in {@link Error.cause}.
+ * `name` is always `AbortError` (not the class name) so this remains compatible with
+ * AbortSignal ecosystem checks (`error.name === 'AbortError'`), including `DOMException`
+ * AbortErrors from other layers that are normalized with the original value in
+ * {@link Error.cause}.
  */
 export class AthenaQueryResultCollectorAbortError extends AthenaQueryResultCollectorError {
+  override readonly name: string = 'AbortError';
   readonly code = 'ABORT' as const;
 
   /**
@@ -64,6 +68,6 @@ export class AthenaQueryResultCollectorAbortError extends AthenaQueryResultColle
    */
   constructor(message: string = 'Aborted', options?: CollectorErrorOptions) {
     super(message, options);
-    this.name = 'AbortError';
+    Object.setPrototypeOf(this, AthenaQueryResultCollectorAbortError.prototype);
   }
 }

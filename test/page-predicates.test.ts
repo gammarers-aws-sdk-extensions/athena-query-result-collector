@@ -1,4 +1,4 @@
-import { hasMorePages } from '../src/page-predicates';
+import { hasMorePages } from '../src/core/page-predicates';
 
 describe('hasMorePages', () => {
   it.each([

@@ -1,3 +1,4 @@
+import { AthenaClient } from '@aws-sdk/client-athena';
 import { AthenaQueryResultPager } from 'athena-query-result-pager';
 import {
   AthenaQueryResultCollector,
@@ -58,7 +59,7 @@ jest.mock('athena-query-result-pager', () => {
 });
 
 describe('AthenaQueryResultCollector', () => {
-  const mockClient = {} as any;
+  const mockClient = {} as AthenaClient;
   const queryExecutionId = 'query-id-123';
 
   beforeEach(() => {
