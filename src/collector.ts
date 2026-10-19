@@ -224,7 +224,8 @@ export class AthenaQueryResultCollector {
    * @returns Aggregated rows and collection metadata.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
+   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or
+   *   parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async collect(queryExecutionId: string): Promise<CollectResult<ParsedRow>> {
     return this.collectWith(queryExecutionId, (row) => row);
@@ -252,7 +253,8 @@ export class AthenaQueryResultCollector {
    * @returns Aggregated transformed rows and collection metadata.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
+   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or
+   *   parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async collectWith<T>(
     queryExecutionId: string,
@@ -320,7 +322,8 @@ export class AthenaQueryResultCollector {
    * @yields Successive `T` values in execution order.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
+   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or
+   *   parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async *stream<T>(
     queryExecutionId: string,
@@ -369,7 +372,8 @@ export class AthenaQueryResultCollector {
    * @returns Total rows processed and number of pages handled.
    * @throws {AthenaQueryResultCollectorAbortError} When `AbortSignal` aborts (`name === 'AbortError'`).
    * @throws {AthenaQueryResultCollectorConcurrentUseError} When another operation is already in flight.
-   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
+   * @throws {Error} When page fetch fails. Intentional `Error` subclasses from the pager or
+   *   parser (for example {@link AthenaQueryResultPagerError}) are rethrown unchanged.
    */
   async processBatches<T>(
     queryExecutionId: string,

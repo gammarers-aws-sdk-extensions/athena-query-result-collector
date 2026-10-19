@@ -264,6 +264,7 @@
         {
           "execArgs": [
             "jest",
+            "--silent",
             "--passWithNoTests",
             "--updateSnapshot"
           ],
@@ -329,6 +330,7 @@
           "execArgs": [
             "npm",
             "update",
+            "@gammarers/projen-projects",
             "@stylistic/eslint-plugin",
             "@types/jest",
             "@types/node",
