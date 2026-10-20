@@ -12,6 +12,9 @@ export {
 } from './core/errors';
 
 export {
+  AthenaQueryExecutionPager,
+  AthenaQueryResultPager,
+  AthenaQueryResultPagerConcurrentAccessError,
   AthenaQueryResultPagerEmptyQueryExecutionIdError,
   AthenaQueryResultPagerError,
   AthenaQueryResultPagerInvalidMaxResultsError,

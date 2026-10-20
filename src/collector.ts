@@ -1,5 +1,12 @@
 import { AthenaClient } from '@aws-sdk/client-athena';
-import { AthenaQueryResultPager, type ParsedRow, type RowParser, type PageResult, type PagerOptions } from 'athena-query-result-pager';
+import {
+  AthenaQueryResultPager,
+  type AthenaQueryExecutionPager,
+  type ParsedRow,
+  type RowParser,
+  type PageResult,
+  type PagerOptions,
+} from 'athena-query-result-pager';
 import {
   AthenaQueryResultCollectorError,
   AthenaQueryResultCollectorAbortError,
@@ -97,10 +104,10 @@ export interface CollectResult<T> {
  *
  * Concurrency: One instance is **not** safe for overlapping {@link AthenaQueryResultCollector.collect},
  * {@link AthenaQueryResultCollector.collectWith}, {@link AthenaQueryResultCollector.stream}, or
- * {@link AthenaQueryResultCollector.processBatches} calls. The internal pager keeps parser state
- * (for example header-row bookkeeping) that {@link AthenaQueryResultPager.reset} clears between
- * executions. A second in-flight operation throws. For parallel work, create separate collector
- * instances (sharing the same `AthenaClient` is fine). Direct pager use via
+ * {@link AthenaQueryResultCollector.processBatches} calls. Each operation obtains an
+ * {@link AthenaQueryExecutionPager} via {@link AthenaQueryResultPager.forExecution} so parser state
+ * stays isolated per query. A second in-flight operation throws. For parallel work, create separate
+ * collector instances (sharing the same `AthenaClient` is fine). Direct pager use via
  * {@link AthenaQueryResultCollector.getPager} must also be serialized with collector operations.
  */
 export class AthenaQueryResultCollector {
@@ -168,24 +175,24 @@ export class AthenaQueryResultCollector {
   /**
    * Yields result pages until Athena returns no continuation token.
    *
-   * Same pagination shape as {@link AthenaQueryResultPager.iteratePagesWith}: fetch a page,
+   * Same pagination shape as {@link AthenaQueryExecutionPager.iteratePagesWith}: fetch a page,
    * yield it, then continue while {@link hasMorePages} is true. Each fetch goes through
    * {@link AthenaQueryResultCollector.fetchPage} so abort and error normalization stay on
    * the collector. Transient API retries are left to {@link AthenaClient}.
    *
    * @typeParam T - Output type produced by `rowParser`.
-   * @param queryExecutionId - Athena query execution identifier.
+   * @param execution - Execution-scoped pager handle from {@link AthenaQueryResultPager.forExecution}.
    * @param rowParser - Converts each parsed row into `T`.
    * @yields Successive pages in execution order.
    */
   private async *iteratePages<T>(
-    queryExecutionId: string,
+    execution: AthenaQueryExecutionPager,
     rowParser: RowParser<T>,
   ): AsyncGenerator<PageResult<T>> {
     let nextToken: string | undefined;
 
     do {
-      const page = await this.fetchPage(queryExecutionId, rowParser, nextToken);
+      const page = await this.fetchPage(execution, rowParser, nextToken);
       yield page;
       nextToken = page.nextToken;
     } while (hasMorePages(nextToken));
@@ -195,18 +202,18 @@ export class AthenaQueryResultCollector {
    * Yields rows from {@link AthenaQueryResultCollector.iteratePages} without buffering
    * the full result set.
    *
-   * Same shape as {@link AthenaQueryResultPager.iterateRows}.
+   * Same shape as {@link AthenaQueryExecutionPager.iterateRows}.
    *
    * @typeParam T - Output type produced by `rowParser`.
-   * @param queryExecutionId - Athena query execution identifier.
+   * @param execution - Execution-scoped pager handle from {@link AthenaQueryResultPager.forExecution}.
    * @param rowParser - Converts each parsed row into `T`.
    * @yields Successive `T` values in execution order.
    */
   private async *iterateRows<T>(
-    queryExecutionId: string,
+    execution: AthenaQueryExecutionPager,
     rowParser: RowParser<T>,
   ): AsyncGenerator<T> {
-    for await (const page of this.iteratePages(queryExecutionId, rowParser)) {
+    for await (const page of this.iteratePages(execution, rowParser)) {
       for (const row of page.rows) {
         yield row;
       }
@@ -234,15 +241,15 @@ export class AthenaQueryResultCollector {
   /**
    * Collects all rows and maps each {@link ParsedRow} through `rowParser` into a single in-memory array.
    *
-   * Paginates like {@link AthenaQueryResultPager.iteratePagesWith} via
+   * Paginates like {@link AthenaQueryExecutionPager.iteratePagesWith} via
    * {@link AthenaQueryResultCollector.iteratePages}, applying collector options
    * (`maxRows`, `onPage`, `signal`) on each fetched page.
    *
    * Accumulates every transformed row before returning. Suitable for small-to-moderate results.
    * Large result sets can exhaust process memory (OOM); prefer
    * {@link AthenaQueryResultCollector.stream} or {@link AthenaQueryResultCollector.processBatches},
-   * or call `iterateRows` / `iteratePages` / `iteratePagesWith` on
-   * {@link AthenaQueryResultCollector.getPager}.
+   * or call `forExecution(queryExecutionId)` on {@link AthenaQueryResultCollector.getPager}
+   * and use `iterateRows` / `iteratePages` / `iteratePagesWith` on that handle.
    *
    * Respects {@link CollectorOptions.maxRows}, invokes {@link CollectorOptions.onPage} after each page,
    * and honors {@link CollectorOptions.signal} between pages.
@@ -267,11 +274,11 @@ export class AthenaQueryResultCollector {
     let truncated = false;
 
     try {
-      this.pager.reset();
+      const execution = this.pager.forExecution(queryExecutionId);
 
       this.throwIfAborted();
 
-      for await (const page of this.iteratePages(queryExecutionId, rowParser)) {
+      for await (const page of this.iteratePages(execution, rowParser)) {
         this.throwIfAborted();
 
         pageCount++;
@@ -305,7 +312,7 @@ export class AthenaQueryResultCollector {
   /**
    * Lazily yields rows one at a time without buffering the full result set in memory.
    *
-   * Paginates like {@link AthenaQueryResultPager.iterateRows} via
+   * Paginates like {@link AthenaQueryExecutionPager.iterateRows} via
    * {@link AthenaQueryResultCollector.iterateRows}, adding
    * {@link CollectorOptions.maxRows} and {@link CollectorOptions.signal} handling.
    *
@@ -334,11 +341,11 @@ export class AthenaQueryResultCollector {
     let count = 0;
 
     try {
-      this.pager.reset();
+      const execution = this.pager.forExecution(queryExecutionId);
 
       this.throwIfAborted();
 
-      for await (const row of this.iterateRows(queryExecutionId, rowParser)) {
+      for await (const row of this.iterateRows(execution, rowParser)) {
         this.throwIfAborted();
         if (isMaxRowsReached(count, this.options.maxRows)) {
           return;
@@ -354,7 +361,7 @@ export class AthenaQueryResultCollector {
   /**
    * Processes each fetched page through `batchProcessor` without accumulating all rows in memory.
    *
-   * Paginates like {@link AthenaQueryResultPager.iteratePagesWith} via
+   * Paginates like {@link AthenaQueryExecutionPager.iteratePagesWith} via
    * {@link AthenaQueryResultCollector.iteratePages}, adding
    * {@link CollectorOptions.maxRows} and {@link CollectorOptions.signal} handling.
    *
@@ -386,15 +393,15 @@ export class AthenaQueryResultCollector {
     let totalRows = 0;
 
     try {
-      this.pager.reset();
-
       if (this.options.maxRows === 0) {
         return { totalRows: 0, pageCount: 0 };
       }
 
+      const execution = this.pager.forExecution(queryExecutionId);
+
       this.throwIfAborted();
 
-      for await (const page of this.iteratePages(queryExecutionId, rowParser)) {
+      for await (const page of this.iteratePages(execution, rowParser)) {
         this.throwIfAborted();
         if (isMaxRowsReached(totalRows, this.options.maxRows)) {
           break;
@@ -430,7 +437,7 @@ export class AthenaQueryResultCollector {
    * against abort. Transient API retries are performed by {@link AthenaClient}, not here.
    *
    * @typeParam T - Output type produced by `rowParser`.
-   * @param queryExecutionId - Athena query execution identifier.
+   * @param execution - Execution-scoped pager handle from {@link AthenaQueryResultPager.forExecution}.
    * @param rowParser - Converts each parsed row into `T`.
    * @param nextToken - Continuation token; omit on the first page.
    * @returns One page of transformed rows and pagination metadata.
@@ -440,14 +447,14 @@ export class AthenaQueryResultCollector {
    *   are rethrown unchanged; other rejections are normalized to `Error` with `cause`.
    */
   private async fetchPage<T>(
-    queryExecutionId: string,
+    execution: AthenaQueryExecutionPager,
     rowParser: RowParser<T>,
     nextToken?: string,
   ): Promise<PageResult<T>> {
     this.throwIfAborted();
     try {
       return await this.raceWithAbort(
-        this.pager.fetchPageWith(queryExecutionId, rowParser, nextToken),
+        execution.fetchPageWith(rowParser, nextToken),
       );
     } catch (error: unknown) {
       this.throwIfAborted();
@@ -634,18 +641,18 @@ export class AthenaQueryResultCollector {
   /**
    * Returns the internal {@link AthenaQueryResultPager} for advanced pagination use.
    *
-   * For large result sets, call the pager's memory-efficient iterators directly
+   * Call {@link AthenaQueryResultPager.forExecution} to obtain an
+   * {@link AthenaQueryExecutionPager}, then use that handle's iterators
    * (`iterateRows`, `iteratePages`, `iteratePagesWith`) instead of
    * {@link AthenaQueryResultCollector.collect} / {@link AthenaQueryResultCollector.collectWith}.
    * Note that collector options such as `maxRows`, `onPage`, and `signal` are not
    * applied when you drive the pager yourself.
    *
-   * Do not use the pager while a collector operation is in flight on the same instance.
-   * The pager shares parser state with collector methods. The pager auto-resets when
-   * `queryExecutionId` changes; {@link AthenaQueryResultPager.reset} is still available to
-   * clear state explicitly (for example before reusing the same execution id).
+   * Do not overlap execution-handle use with collector operations on the same instance.
+   * Parser state is isolated per {@link AthenaQueryExecutionPager}; call
+   * {@link AthenaQueryExecutionPager.reset} on a handle when you need to clear it explicitly.
    *
-   * @returns The pager instance constructed with the same client and {@link PagerOptions} fields from the collector options.
+   * @returns The pager factory constructed with the same client and {@link PagerOptions} fields from the collector options.
    */
   getPager(): AthenaQueryResultPager {
     return this.pager;

@@ -11,17 +11,17 @@ import {
 } from '../src';
 
 const mockFetchPageWith = jest.fn();
-const mockReset = jest.fn();
+const mockForExecution = jest.fn();
 
-const pagerIterators = {
+const executionHandle = {
+  fetchPageWith: mockFetchPageWith,
   async *iteratePagesWith<T>(
     this: { fetchPageWith: typeof mockFetchPageWith },
-    queryExecutionId: string,
     rowParser: (row: unknown) => T,
   ): AsyncGenerator<PageResult<T>> {
     let nextToken: string | undefined;
     do {
-      const page = await this.fetchPageWith(queryExecutionId, rowParser, nextToken);
+      const page = await this.fetchPageWith(rowParser, nextToken);
       yield page;
       nextToken = page.nextToken;
     } while (nextToken);
@@ -29,14 +29,12 @@ const pagerIterators = {
   async *iterateRows<T>(
     this: {
       iteratePagesWith: (
-        queryExecutionId: string,
         rowParser: (row: unknown) => T,
       ) => AsyncGenerator<PageResult<T>>;
     },
-    queryExecutionId: string,
     rowParser: (row: unknown) => T,
   ): AsyncGenerator<T> {
-    for await (const page of this.iteratePagesWith(queryExecutionId, rowParser)) {
+    for await (const page of this.iteratePagesWith(rowParser)) {
       for (const row of page.rows) {
         yield row;
       }
@@ -51,9 +49,7 @@ jest.mock('athena-query-result-pager', () => {
   return {
     ...actual,
     AthenaQueryResultPager: jest.fn().mockImplementation(() => ({
-      fetchPageWith: mockFetchPageWith,
-      reset: mockReset,
-      ...pagerIterators,
+      forExecution: mockForExecution,
     })),
   };
 });
@@ -65,7 +61,8 @@ describe('AthenaQueryResultCollector', () => {
   beforeEach(() => {
     // clearAllMocks does not reset mock implementations; we want isolation between tests
     mockFetchPageWith.mockReset();
-    mockReset.mockReset();
+    mockForExecution.mockReset();
+    mockForExecution.mockImplementation(() => executionHandle);
     MockAthenaQueryResultPager.mockClear();
   });
 
@@ -79,9 +76,8 @@ describe('AthenaQueryResultCollector', () => {
     it('should collect when options are omitted', async () => {
       const collector = new AthenaQueryResultCollector(mockClient);
       mockFetchPageWith.mockResolvedValue({ rows: [], rowCount: 0 });
-      mockReset.mockImplementation(() => {});
       await collector.collect(queryExecutionId);
-      expect(mockReset).toHaveBeenCalled();
+      expect(mockForExecution).toHaveBeenCalledWith(queryExecutionId);
     });
 
     it('should pass only PagerOptions fields to AthenaQueryResultPager', () => {
@@ -117,8 +113,7 @@ describe('AthenaQueryResultCollector', () => {
       const collector = new AthenaQueryResultCollector(mockClient);
       const pager = collector.getPager();
       expect(pager).toBeDefined();
-      expect(pager.reset).toBe(mockReset);
-      expect(pager.fetchPageWith).toBe(mockFetchPageWith);
+      expect(pager.forExecution).toBe(mockForExecution);
     });
   });
 
@@ -140,7 +135,8 @@ describe('AthenaQueryResultCollector', () => {
       expect(result.totalRows).toBe(2);
       expect(result.pageCount).toBe(1);
       expect(result.truncated).toBe(false);
-      expect(mockFetchPageWith).toHaveBeenCalledWith(queryExecutionId, expect.any(Function), undefined);
+      expect(mockForExecution).toHaveBeenCalledWith(queryExecutionId);
+      expect(mockFetchPageWith).toHaveBeenCalledWith(expect.any(Function), undefined);
     });
 
     it('should fetch multiple pages via nextToken and return all rows', async () => {
@@ -162,26 +158,27 @@ describe('AthenaQueryResultCollector', () => {
       expect(result.totalRows).toBe(2);
       expect(result.pageCount).toBe(2);
       expect(result.truncated).toBe(false);
-      expect(mockFetchPageWith).toHaveBeenNthCalledWith(1, queryExecutionId, expect.any(Function), undefined);
-      expect(mockFetchPageWith).toHaveBeenNthCalledWith(2, queryExecutionId, expect.any(Function), 'token1');
+      expect(mockForExecution).toHaveBeenCalledWith(queryExecutionId);
+      expect(mockFetchPageWith).toHaveBeenNthCalledWith(1, expect.any(Function), undefined);
+      expect(mockFetchPageWith).toHaveBeenNthCalledWith(2, expect.any(Function), 'token1');
     });
 
     it('should call reset before collect runs', async () => {
       mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 } as PageResult<any>);
       const collector = new AthenaQueryResultCollector(mockClient);
       await collector.collect(queryExecutionId);
-      expect(mockReset).toHaveBeenCalled();
+      expect(mockForExecution).toHaveBeenCalledWith(queryExecutionId);
     });
   });
 
   describe('collectWith', () => {
     it('should return rows transformed by rowParser', async () => {
       const rawRows = [{ name: 'foo' }, { name: 'bar' }];
-      mockFetchPageWith.mockImplementation((_q, rowParser: (r: any) => any) =>
+      mockFetchPageWith.mockImplementation((rowParser: (r: Record<string, string>) => unknown) =>
         Promise.resolve({
           rows: rawRows.map((r) => rowParser(r)),
           rowCount: 2,
-        } as PageResult<any>),
+        } as PageResult<unknown>),
       );
 
       const collector = new AthenaQueryResultCollector(mockClient);
@@ -320,7 +317,7 @@ describe('AthenaQueryResultCollector', () => {
       const collector = new AthenaQueryResultCollector(mockClient);
       const gen = collector.stream(queryExecutionId, (r) => r);
       await gen.next();
-      expect(mockReset).toHaveBeenCalled();
+      expect(mockForExecution).toHaveBeenCalledWith(queryExecutionId);
     });
   });
 
@@ -359,7 +356,7 @@ describe('AthenaQueryResultCollector', () => {
       mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 } as PageResult<any>);
       const collector = new AthenaQueryResultCollector(mockClient);
       await collector.processBatches(queryExecutionId, (r) => r, () => {});
-      expect(mockReset).toHaveBeenCalled();
+      expect(mockForExecution).toHaveBeenCalledWith(queryExecutionId);
     });
 
     it('should not fetch any pages when maxRows is 0', async () => {
