@@ -6,7 +6,7 @@
 [![build](https://img.shields.io/github/actions/workflow/status/gammarers-aws-sdk-extensions/athena-query-result-collector/build.yml?label=build&style=flat-square)](https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector/actions/workflows/build.yml)
 
 A TypeScript library for collecting AWS Athena query results via pagination.
-It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) (^0.7.x) internally.
+It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) (^0.8.x) internally.
 
 ## Features
 
@@ -14,7 +14,7 @@ It supports full collection, streaming, and page-based batch processing, and it 
 - Stream rows lazily with `stream()` as an `AsyncGenerator`
 - Process rows per page with `processBatches()` without buffering the full result set
 - Cap output with collector `maxRows` (cumulative across pages; distinct from pager/parser `maxRows` on one `ResultSet`)
-- Report progress with `onPage` during `collect()` / `collectWith()`
+- Report progress with `onPage` during `collect()` / `collectWith()`, including `CollectionTruncation` when unread rows remain
 - Forward pager settings (`maxResults`, `queryResultType`, `parseResultSetOptions`) while keeping collector-only options separate
 - Cancel long-running work with `AbortSignal` (`CollectorOptions.signal`)
 - Rely on the injected `AthenaClient` for transient `GetQueryResults` retries (for example `maxAttempts`)
@@ -67,7 +67,30 @@ const result = await collector.collect('query-execution-id');
 console.log(result.rows);       // ParsedRow[]
 console.log(result.totalRows);
 console.log(result.pageCount);
-console.log(result.truncated);  // true if limited by maxRows
+console.log(result.truncated);  // true when rows remain past maxRows
+```
+
+### Progress (`onPage`)
+
+`onPage` runs after every page kept by `collect()` / `collectWith()`, including the page that reaches `maxRows`. `page.rows` are the rows kept under the cap. `truncation` is `CollectionTruncation.Truncated` when unread rows remain, and `CollectionTruncation.NotTruncated` when the page does not leave unread rows.
+
+```typescript
+import {
+  AthenaQueryResultCollector,
+  CollectionTruncation,
+} from 'athena-query-result-collector';
+
+const collector = new AthenaQueryResultCollector(client, {
+  maxRows: 1000,
+  onPage: (page, totalCollected, truncation) => {
+    console.log(page.rows.length, totalCollected, truncation);
+    if (truncation === CollectionTruncation.Truncated) {
+      console.log('unread rows remain');
+    }
+  },
+});
+
+await collector.collect('query-execution-id');
 ```
 
 ### Collection with a custom parser
@@ -109,7 +132,7 @@ await collector.processBatches(
 | `collect()` / `collectWith()` | Accumulates **all** rows into one array; large results can **OOM** | Small-to-moderate results that must fit in memory, or when you need aggregated metadata (`totalRows`, `pageCount`, `truncated`) |
 | `stream()` | Yields one row at a time; only the current page is retained | Large result sets consumed row-by-row |
 | `processBatches()` | Passes one page at a time; does not accumulate all rows | Large result sets written or forwarded in page-sized chunks |
-| `getPager().forExecution(id).iterateRows()` / `iteratePages()` / `iteratePagesWith()` | Same paging model as the pager; collector options are **not** applied | Lower-level control without collector `maxRows` / `signal` |
+| `getPager().forExecution(id).iterateRows()` / `iteratePages()` / `iteratePagesWith()` | Same paging model as the pager; collector options are **not** applied | Lower-level control without collector `maxRows` / `onPage` / `signal` |
 
 ### Concurrency
 
@@ -249,15 +272,15 @@ try {
 
 ## Options
 
-`CollectorOptions` extends `PagerOptions` from `athena-query-result-pager` 0.7.x.
+`CollectorOptions` extends `PagerOptions` from `athena-query-result-pager` 0.8.x.
 Only pager fields are forwarded to the internal `AthenaQueryResultPager` instance.
 
 ### Collector options
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `maxRows` | `number` | Cumulative row limit **across all pages** for `collect()` / `stream()` / `processBatches()` (unlimited if omitted). Distinct from pager/parser `maxRows`, which caps rows inside a single Athena `ResultSet` (one page) |
-| `onPage` | `function` | Callback after each fetched page in `collect()` / `collectWith()`; receives the page and cumulative row count |
+| `maxRows` | `number` | Cumulative row limit **across all pages** for `collect()` / `collectWith()` / `stream()` / `processBatches()` (unlimited if omitted). Distinct from pager/parser `maxRows`, which caps rows inside a single Athena `ResultSet` (one page) |
+| `onPage` | `(page: PageResult<T>, totalCollected: number, truncation: CollectionTruncation) => void \| Promise<void>` | Called after each fetched page in `collect()` / `collectWith()`, including the page that reaches `maxRows`. `page.rows` are the rows kept under the cap. `truncation` is `CollectionTruncation.Truncated` when unread rows remain, and `CollectionTruncation.NotTruncated` otherwise |
 | `signal` | `AbortSignal` | Cancel collection/streaming/batch loops and pending page-fetch waits (throws `AthenaQueryResultCollectorAbortError` with `name === 'AbortError'`) |
 
 ### Pager options (forwarded)
@@ -270,14 +293,14 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 
 ### Re-exported types and values
 
-The package re-exports `ParsedRow`, `RowParser`, `PageResult`, `PagerOptions`, `ParseResultSetOptions`, `HeaderRowDecision`, and `QueryResultType`, plus `AthenaQueryResultPager`, `AthenaQueryExecutionPager`, collector errors `AthenaQueryResultCollectorError`, `AthenaQueryResultCollectorConcurrentUseError`, and `AthenaQueryResultCollectorAbortError`, and pager errors `AthenaQueryResultPagerError`, `AthenaQueryResultPagerInvalidMaxResultsError`, `AthenaQueryResultPagerEmptyQueryExecutionIdError`, and `AthenaQueryResultPagerConcurrentAccessError`.
+The package re-exports `ParsedRow`, `RowParser`, `PageResult`, `PagerOptions`, `ParseResultSetOptions`, `HeaderRowDecision`, and `QueryResultType`, plus `AthenaQueryResultPager`, `AthenaQueryExecutionPager`, `CollectionTruncation`, collector errors `AthenaQueryResultCollectorError`, `AthenaQueryResultCollectorConcurrentUseError`, and `AthenaQueryResultCollectorAbortError`, and pager errors `AthenaQueryResultPagerError`, `AthenaQueryResultPagerInvalidMaxResultsError`, `AthenaQueryResultPagerEmptyQueryExecutionIdError`, and `AthenaQueryResultPagerConcurrentAccessError`.
 
 ## Requirements
 
 - Node.js >= 20.0.0
 - AWS Athena access configured for your runtime (credentials and region via the environment or shared config)
 - Runtime dependency: `@aws-sdk/client-athena` (pass an `AthenaClient` to the collector)
-- Bundled dependency: `athena-query-result-pager` ^0.7.x
+- Bundled dependency: `athena-query-result-pager` ^0.8.x
 
 ## License
 

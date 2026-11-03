@@ -10,10 +10,10 @@ const project = new ProjenTypeScriptProject({
   workflowNodeVersion: '24.x',
   deps: [
     '@aws-sdk/client-athena@^3.983.0',
-    'athena-query-result-pager@^0.7.0',
+    'athena-query-result-pager@^0.8.0',
   ],
   devDeps: [
-    '@gammarers/projen-projects@^0.5.10',
+    '@gammarers/projen-projects@^0.6.3',
   ],
 });
 project.synth();
