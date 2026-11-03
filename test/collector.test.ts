@@ -181,6 +181,8 @@ describe('AthenaQueryResultCollector', () => {
         Promise.resolve({
           rows: rawRows.map((r) => rowParser(r)),
           rowCount: 2,
+          pageIndex: 0,
+          cumulativeRowCount: 2,
         } as PageResult<unknown>),
       );
 
@@ -600,7 +602,7 @@ describe('AthenaQueryResultCollector', () => {
       await expect(collectPromise).rejects.toMatchObject({ name: 'AbortError' });
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
 
-      resolveFetch({ rows: [{ id: 1 }], rowCount: 1 });
+      resolveFetch({ rows: [{ id: 1 }], rowCount: 1, pageIndex: 0, cumulativeRowCount: 1 });
     });
 
 
@@ -609,6 +611,8 @@ describe('AthenaQueryResultCollector', () => {
       mockFetchPageWith.mockResolvedValueOnce({
         rows: [{ id: 1 }, { id: 2 }, { id: 3 }],
         rowCount: 3,
+        pageIndex: 0,
+        cumulativeRowCount: 3,
       } as PageResult<{ id: number }>);
 
       const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
@@ -624,6 +628,8 @@ describe('AthenaQueryResultCollector', () => {
       mockFetchPageWith.mockResolvedValueOnce({
         rows: [{ n: 1 }],
         rowCount: 1,
+        pageIndex: 0,
+        cumulativeRowCount: 1,
       } as PageResult<{ n: number }>);
 
       const batchProcessor = jest.fn();
@@ -657,7 +663,7 @@ describe('AthenaQueryResultCollector', () => {
       expect((error as AthenaQueryResultCollectorConcurrentUseError).name).toBe('AthenaQueryResultCollectorConcurrentUseError');
       expect((error as AthenaQueryResultCollectorConcurrentUseError).code).toBe('CONCURRENT_USE');
 
-      resolveFetch({ rows: [], rowCount: 0 });
+      resolveFetch({ rows: [], rowCount: 0, pageIndex: 0, cumulativeRowCount: 0 });
       await first;
     });
 
@@ -678,7 +684,7 @@ describe('AthenaQueryResultCollector', () => {
         name: 'AthenaQueryResultCollectorConcurrentUseError',
       });
 
-      resolveFetch({ rows: [], rowCount: 0 });
+      resolveFetch({ rows: [], rowCount: 0, pageIndex: 0, cumulativeRowCount: 0 });
       await first;
     });
 
@@ -687,6 +693,8 @@ describe('AthenaQueryResultCollector', () => {
         rows: [{ id: 1 }],
         nextToken: 'more',
         rowCount: 1,
+        pageIndex: 0,
+        cumulativeRowCount: 1,
       } as PageResult<{ id: number }>);
 
       const collector = new AthenaQueryResultCollector(mockClient);
@@ -715,6 +723,8 @@ describe('AthenaQueryResultCollector', () => {
         rows: [{ id: 1 }],
         nextToken: 'more',
         rowCount: 1,
+        pageIndex: 0,
+        cumulativeRowCount: 1,
       } as PageResult<{ id: number }>);
 
       const collector = new AthenaQueryResultCollector(mockClient);
@@ -734,15 +744,21 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ a: 1 }, { a: 2 }],
           nextToken: 't1',
           rowCount: 2,
+          pageIndex: 0,
+          cumulativeRowCount: 2,
         } as PageResult<unknown>)
         .mockResolvedValueOnce({
           rows: [{ a: 3 }],
           nextToken: 't2',
           rowCount: 1,
+          pageIndex: 1,
+          cumulativeRowCount: 3,
         } as PageResult<unknown>)
         .mockResolvedValueOnce({
           rows: [{ a: 4 }],
           rowCount: 1,
+          pageIndex: 2,
+          cumulativeRowCount: 4,
         } as PageResult<unknown>);
 
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2 });
@@ -895,7 +911,12 @@ describe('AthenaQueryResultCollector', () => {
       mockFetchPageWith.mockImplementation(() => {
         controller.abort();
         return new Promise<PageResult<unknown>>((resolve) => {
-          setTimeout(() => resolve({ rows: [{ id: 1 }], rowCount: 1 }), 100);
+          setTimeout(() => resolve({
+            rows: [{ id: 1 }],
+            rowCount: 1,
+            pageIndex: 0,
+            cumulativeRowCount: 1,
+          }), 100);
         });
       });
 

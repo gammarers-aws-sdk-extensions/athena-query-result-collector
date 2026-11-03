@@ -6,7 +6,7 @@
 [![build](https://img.shields.io/github/actions/workflow/status/gammarers-aws-sdk-extensions/athena-query-result-collector/build.yml?label=build&style=flat-square)](https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector/actions/workflows/build.yml)
 
 A TypeScript library for collecting AWS Athena query results via pagination.
-It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) (^0.7.x) internally.
+It supports full collection, streaming, and page-based batch processing, and it uses [athena-query-result-pager](https://www.npmjs.com/package/athena-query-result-pager) (^0.8.x) internally.
 
 ## Features
 
@@ -272,7 +272,7 @@ try {
 
 ## Options
 
-`CollectorOptions` extends `PagerOptions` from `athena-query-result-pager` 0.7.x.
+`CollectorOptions` extends `PagerOptions` from `athena-query-result-pager` 0.8.x.
 Only pager fields are forwarded to the internal `AthenaQueryResultPager` instance.
 
 ### Collector options
@@ -300,7 +300,7 @@ The package re-exports `ParsedRow`, `RowParser`, `PageResult`, `PagerOptions`, `
 - Node.js >= 20.0.0
 - AWS Athena access configured for your runtime (credentials and region via the environment or shared config)
 - Runtime dependency: `@aws-sdk/client-athena` (pass an `AthenaClient` to the collector)
-- Bundled dependency: `athena-query-result-pager` ^0.7.x
+- Bundled dependency: `athena-query-result-pager` ^0.8.x
 
 ## License
 
