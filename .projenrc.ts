@@ -13,7 +13,7 @@ const project = new ProjenTypeScriptProject({
     'athena-query-result-pager@^0.7.0',
   ],
   devDeps: [
-    '@gammarers/projen-projects@^0.5.10',
+    '@gammarers/projen-projects@^0.6.3',
   ],
 });
 project.synth();
