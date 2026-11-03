@@ -569,6 +569,27 @@ describe('AthenaQueryResultCollector', () => {
   });
 
   describe('signal', () => {
+    it('should use the default abort message when the signal has no reason', async () => {
+      // AbortController.abort() always stores a DOMException reason, so this stand-in is the only way to leave reason unset.
+      const signal = {
+        aborted: true,
+        reason: undefined,
+        onabort: null,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => false,
+        throwIfAborted: () => undefined,
+      } as unknown as AbortSignal;
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal });
+      const error = await collector.collect(queryExecutionId).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AthenaQueryResultCollectorAbortError);
+      expect((error as AthenaQueryResultCollectorAbortError).message).toBe('Aborted');
+      expect((error as AthenaQueryResultCollectorAbortError).cause).toBeUndefined();
+      expect(mockFetchPageWith).not.toHaveBeenCalled();
+    });
+
     it('should throw AbortError when signal is already aborted before collect', async () => {
       const controller = new AbortController();
       controller.abort();
@@ -582,6 +603,16 @@ describe('AthenaQueryResultCollector', () => {
       expect((error as AthenaQueryResultCollectorAbortError).name).toBe('AbortError');
       expect((error as AthenaQueryResultCollectorAbortError).code).toBe('ABORT');
       expect(mockFetchPageWith).not.toHaveBeenCalled();
+    });
+
+    it('should normalize a rejected page fetch while a signal is attached', async () => {
+      const controller = new AbortController();
+      mockFetchPageWith.mockRejectedValueOnce(new Error('fetch failed'));
+
+      const collector = new AthenaQueryResultCollector(mockClient, { signal: controller.signal });
+
+      await expect(collector.collect(queryExecutionId)).rejects.toThrow('fetch failed');
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
     });
 
     it('should abort during in-flight page fetch', async () => {
@@ -738,7 +769,7 @@ describe('AthenaQueryResultCollector', () => {
   });
 
   describe('processBatches maxRows edge cases', () => {
-    it('should break at the top of the loop when maxRows is exactly met by a previous page', async () => {
+    it('should not process another page after maxRows is exactly met', async () => {
       mockFetchPageWith
         .mockResolvedValueOnce({
           rows: [{ a: 1 }, { a: 2 }],

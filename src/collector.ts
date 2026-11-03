@@ -450,9 +450,6 @@ export class AthenaQueryResultCollector {
 
       for await (const page of this.iteratePages(execution, rowParser)) {
         this.ensureNotAborted();
-        if (isMaxRowsReached(totalRows, this.options.maxRows)) {
-          break;
-        }
 
         let rowsToProcess = page.rows;
         const remaining = remainingRowBudget(totalRows, this.options.maxRows);
@@ -555,7 +552,7 @@ export class AthenaQueryResultCollector {
     }
 
     if (typeof error === 'string') {
-      return new Error(error);
+      return new Error(this.extractErrorMessage(error));
     }
 
     const message = this.extractErrorMessage(error);
