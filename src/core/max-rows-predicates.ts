@@ -25,6 +25,26 @@ export const isCollectionTruncated = (
 };
 
 /**
+ * Returns whether a fetched page fills the remaining collector row budget.
+ *
+ * Unlimited collection (`remaining === undefined`) does not fill the budget.
+ *
+ * @param pageRowCount - Rows on the page just fetched.
+ * @param remaining - Rows still allowed under `maxRows`, or `undefined` when unlimited.
+ * @returns `true` when `remaining` is set and `pageRowCount` is at least that budget.
+ */
+export const pageFillsRowBudget = (
+  pageRowCount: number,
+  remaining: number | undefined,
+): remaining is number => {
+  if (remaining === undefined) {
+    return false;
+  }
+
+  return pageRowCount >= remaining;
+};
+
+/**
  * Returns whether a cumulative row count has reached an optional collector `maxRows` cap.
  *
  * @param collected - Rows already kept (or about to be kept) across pages.

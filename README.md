@@ -257,7 +257,7 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 | Option | Type | Description |
 | --- | --- | --- |
 | `maxRows` | `number` | Cumulative row limit **across all pages** for `collect()` / `stream()` / `processBatches()` (unlimited if omitted). Distinct from pager/parser `maxRows`, which caps rows inside a single Athena `ResultSet` (one page) |
-| `onPage` | `function` | Callback after each fetched page in `collect()` / `collectWith()`, including the page that reaches `maxRows`. Arguments are the page (`rows` are the rows kept under the cap), the cumulative row count, and whether unread rows remain |
+| `onPage` | `function` | Callback after each fetched page in `collect()` / `collectWith()`, including the page that reaches `maxRows`. Arguments are the page (`rows` are the rows kept under the cap), the cumulative row count, and `CollectionTruncation` (`Truncated` when unread rows remain, `NotTruncated` otherwise) |
 | `signal` | `AbortSignal` | Cancel collection/streaming/batch loops and pending page-fetch waits (throws `AthenaQueryResultCollectorAbortError` with `name === 'AbortError'`) |
 
 ### Pager options (forwarded)
@@ -270,7 +270,7 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 
 ### Re-exported types and values
 
-The package re-exports `ParsedRow`, `RowParser`, `PageResult`, `PagerOptions`, `ParseResultSetOptions`, `HeaderRowDecision`, and `QueryResultType`, plus `AthenaQueryResultPager`, `AthenaQueryExecutionPager`, collector errors `AthenaQueryResultCollectorError`, `AthenaQueryResultCollectorConcurrentUseError`, and `AthenaQueryResultCollectorAbortError`, and pager errors `AthenaQueryResultPagerError`, `AthenaQueryResultPagerInvalidMaxResultsError`, `AthenaQueryResultPagerEmptyQueryExecutionIdError`, and `AthenaQueryResultPagerConcurrentAccessError`.
+The package re-exports `ParsedRow`, `RowParser`, `PageResult`, `PagerOptions`, `ParseResultSetOptions`, `HeaderRowDecision`, and `QueryResultType`, plus `AthenaQueryResultPager`, `AthenaQueryExecutionPager`, `CollectionTruncation`, collector errors `AthenaQueryResultCollectorError`, `AthenaQueryResultCollectorConcurrentUseError`, and `AthenaQueryResultCollectorAbortError`, and pager errors `AthenaQueryResultPagerError`, `AthenaQueryResultPagerInvalidMaxResultsError`, `AthenaQueryResultPagerEmptyQueryExecutionIdError`, and `AthenaQueryResultPagerConcurrentAccessError`.
 
 ## Requirements
 

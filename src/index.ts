@@ -1,5 +1,6 @@
 export {
   AthenaQueryResultCollector,
+  CollectionTruncation,
   type CollectResult,
   type CollectorOptions,
 } from './collector';

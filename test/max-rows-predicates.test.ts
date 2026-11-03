@@ -1,4 +1,9 @@
-import { isCollectionTruncated, isMaxRowsReached, remainingRowBudget } from '../src/core/max-rows-predicates';
+import {
+  isCollectionTruncated,
+  isMaxRowsReached,
+  pageFillsRowBudget,
+  remainingRowBudget,
+} from '../src/core/max-rows-predicates';
 
 describe('isCollectionTruncated', () => {
   it.each([
@@ -14,6 +19,22 @@ describe('isCollectionTruncated', () => {
     'returns $expected when pageRowCount=$pageRowCount remaining=$remaining nextToken=$nextToken',
     ({ pageRowCount, remaining, nextToken, expected }) => {
       expect(isCollectionTruncated(pageRowCount, remaining, nextToken)).toBe(expected);
+    },
+  );
+});
+
+describe('pageFillsRowBudget', () => {
+  it.each([
+    { pageRowCount: 0, remaining: undefined, expected: false },
+    { pageRowCount: 3, remaining: undefined, expected: false },
+    { pageRowCount: 2, remaining: 3, expected: false },
+    { pageRowCount: 3, remaining: 3, expected: true },
+    { pageRowCount: 4, remaining: 3, expected: true },
+    { pageRowCount: 0, remaining: 0, expected: true },
+  ] as const)(
+    'returns $expected when pageRowCount=$pageRowCount remaining=$remaining',
+    ({ pageRowCount, remaining, expected }) => {
+      expect(pageFillsRowBudget(pageRowCount, remaining)).toBe(expected);
     },
   );
 });

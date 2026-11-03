@@ -12,8 +12,20 @@ import {
   AthenaQueryResultCollectorAbortError,
   AthenaQueryResultCollectorConcurrentUseError,
 } from './core/errors';
-import { isCollectionTruncated, isMaxRowsReached, remainingRowBudget } from './core/max-rows-predicates';
+import { isCollectionTruncated, isMaxRowsReached, pageFillsRowBudget, remainingRowBudget } from './core/max-rows-predicates';
 import { hasMorePages } from './core/page-predicates';
+
+/**
+ * Whether a page handled by `collect` / `collectWith` left unread rows.
+ *
+ * `NotTruncated` covers pages under `maxRows`, and a last page that ends exactly on the cap.
+ */
+export enum CollectionTruncation {
+  /** No unread rows were left by this page. */
+  NotTruncated = 'not-truncated',
+  /** Rows were dropped from this page, or a continuation token remains. */
+  Truncated = 'truncated',
+}
 
 /**
  * Options for {@link AthenaQueryResultCollector}.
@@ -48,13 +60,14 @@ export interface CollectorOptions extends PagerOptions {
    *
    * @param page - Page just retrieved. `rows` are the rows kept under `maxRows`.
    * @param totalCollected - Cumulative row count after appending this page (respecting `maxRows`).
-   * @param truncated - `true` when this page stopped collection with unread rows still remaining.
-   *   `false` on earlier pages and when the result set ends exactly at `maxRows`.
+   * @param truncation - {@link CollectionTruncation.Truncated} when this page stopped collection
+   *   with unread rows still remaining. {@link CollectionTruncation.NotTruncated} on earlier pages
+   *   and when the result set ends exactly at `maxRows`.
    */
   onPage?: <T>(
     page: PageResult<T>,
     totalCollected: number,
-    truncated: boolean,
+    truncation: CollectionTruncation,
   ) => void | Promise<void>;
   /**
    * Optional `AbortSignal` to cancel long-running collection, streaming, or batch processing.
@@ -291,26 +304,30 @@ export class AthenaQueryResultCollector {
     try {
       const execution = this.pager.forExecution(queryExecutionId);
 
-      this.throwIfAborted();
+      this.ensureNotAborted();
 
       for await (const page of this.iteratePages(execution, rowParser)) {
-        this.throwIfAborted();
+        this.ensureNotAborted();
 
         pageCount++;
 
         const remaining = remainingRowBudget(rows.length, this.options.maxRows);
-        if (remaining !== undefined && page.rows.length >= remaining) {
+        if (pageFillsRowBudget(page.rows.length, remaining)) {
           const keptRows = page.rows.slice(0, remaining);
           rows.push(...keptRows);
           // Unread rows remain only when this page dropped rows or Athena has another page.
-          truncated = isCollectionTruncated(page.rows.length, remaining, page.nextToken);
+          let truncation = CollectionTruncation.NotTruncated;
+          if (isCollectionTruncated(page.rows.length, remaining, page.nextToken)) {
+            truncated = true;
+            truncation = CollectionTruncation.Truncated;
+          }
 
           if (this.options.onPage) {
-            this.throwIfAborted();
+            this.ensureNotAborted();
             await this.options.onPage(
               { ...page, rows: keptRows, rowCount: keptRows.length },
               rows.length,
-              truncated,
+              truncation,
             );
           }
           break;
@@ -319,8 +336,8 @@ export class AthenaQueryResultCollector {
         rows.push(...page.rows);
 
         if (this.options.onPage) {
-          this.throwIfAborted();
-          await this.options.onPage(page, rows.length, truncated);
+          this.ensureNotAborted();
+          await this.options.onPage(page, rows.length, CollectionTruncation.NotTruncated);
         }
       }
 
@@ -369,10 +386,10 @@ export class AthenaQueryResultCollector {
     try {
       const execution = this.pager.forExecution(queryExecutionId);
 
-      this.throwIfAborted();
+      this.ensureNotAborted();
 
       for await (const row of this.iterateRows(execution, rowParser)) {
-        this.throwIfAborted();
+        this.ensureNotAborted();
         if (isMaxRowsReached(count, this.options.maxRows)) {
           return;
         }
@@ -419,16 +436,16 @@ export class AthenaQueryResultCollector {
     let totalRows = 0;
 
     try {
-      if (this.options.maxRows === 0) {
+      if (isMaxRowsReached(0, this.options.maxRows)) {
         return { totalRows: 0, pageCount: 0 };
       }
 
       const execution = this.pager.forExecution(queryExecutionId);
 
-      this.throwIfAborted();
+      this.ensureNotAborted();
 
       for await (const page of this.iteratePages(execution, rowParser)) {
-        this.throwIfAborted();
+        this.ensureNotAborted();
         if (isMaxRowsReached(totalRows, this.options.maxRows)) {
           break;
         }
@@ -439,7 +456,7 @@ export class AthenaQueryResultCollector {
           rowsToProcess = page.rows.slice(0, remaining);
         }
 
-        this.throwIfAborted();
+        this.ensureNotAborted();
         await batchProcessor(rowsToProcess, pageCount);
 
         pageCount++;
@@ -477,13 +494,13 @@ export class AthenaQueryResultCollector {
     rowParser: RowParser<T>,
     nextToken?: string,
   ): Promise<PageResult<T>> {
-    this.throwIfAborted();
+    this.ensureNotAborted();
     try {
       return await this.raceWithAbort(
         execution.fetchPageWith(rowParser, nextToken),
       );
     } catch (error: unknown) {
-      this.throwIfAborted();
+      this.ensureNotAborted();
       throw this.normalizeError(error);
     }
   }
@@ -580,7 +597,7 @@ export class AthenaQueryResultCollector {
    *
    * @throws {AthenaQueryResultCollectorAbortError} With `name === 'AbortError'` when the signal is aborted.
    */
-  private throwIfAborted(): void {
+  private ensureNotAborted(): void {
     if (!this.signal) {
       return;
     }

@@ -7,8 +7,11 @@ import {
   AthenaQueryResultCollectorConcurrentUseError,
   AthenaQueryResultPagerError,
   AthenaQueryResultPagerInvalidMaxResultsError,
+  CollectionTruncation,
   type PageResult,
+  type ParsedRow,
 } from '../src';
+import { hasMorePages } from '../src/core/page-predicates';
 
 const mockFetchPageWith = jest.fn();
 const mockForExecution = jest.fn();
@@ -24,7 +27,7 @@ const executionHandle = {
       const page = await this.fetchPageWith(rowParser, nextToken);
       yield page;
       nextToken = page.nextToken;
-    } while (nextToken);
+    } while (hasMorePages(nextToken));
   },
   async *iterateRows<T>(
     this: {
@@ -126,7 +129,7 @@ describe('AthenaQueryResultCollector', () => {
       mockFetchPageWith.mockResolvedValueOnce({
         rows,
         rowCount: rows.length,
-      } as PageResult<any>);
+      });
 
       const collector = new AthenaQueryResultCollector(mockClient);
       const result = await collector.collect(queryExecutionId);
@@ -145,11 +148,11 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ x: 1 }],
           nextToken: 'token1',
           rowCount: 1,
-        } as PageResult<any>)
+        })
         .mockResolvedValueOnce({
           rows: [{ x: 2 }],
           rowCount: 1,
-        } as PageResult<any>);
+        });
 
       const collector = new AthenaQueryResultCollector(mockClient);
       const result = await collector.collect(queryExecutionId);
@@ -164,7 +167,7 @@ describe('AthenaQueryResultCollector', () => {
     });
 
     it('should call reset before collect runs', async () => {
-      mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 } as PageResult<any>);
+      mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 });
       const collector = new AthenaQueryResultCollector(mockClient);
       await collector.collect(queryExecutionId);
       expect(mockForExecution).toHaveBeenCalledWith(queryExecutionId);
@@ -200,17 +203,17 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ i: 1 }, { i: 2 }, { i: 3 }],
           nextToken: 't',
           rowCount: 3,
-        } as PageResult<any>)
+        })
         .mockResolvedValueOnce({
           rows: [{ i: 4 }, { i: 5 }],
           rowCount: 2,
-        } as PageResult<any>);
+        });
 
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 4 });
       const result = await collector.collect(queryExecutionId);
 
       expect(result.rows).toHaveLength(4);
-      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2, 3, 4]);
+      expect(result.rows.map((r: ParsedRow) => r.i)).toEqual([1, 2, 3, 4]);
       expect(result.totalRows).toBe(4);
       expect(result.truncated).toBe(true);
       expect(result.pageCount).toBe(2);
@@ -222,16 +225,16 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ i: 1 }, { i: 2 }],
           nextToken: 't',
           rowCount: 2,
-        } as PageResult<any>)
+        })
         .mockResolvedValueOnce({
           rows: [{ i: 3 }, { i: 4 }],
           rowCount: 2,
-        } as PageResult<any>);
+        });
 
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 4 });
       const result = await collector.collect(queryExecutionId);
 
-      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2, 3, 4]);
+      expect(result.rows.map((r: ParsedRow) => r.i)).toEqual([1, 2, 3, 4]);
       expect(result.totalRows).toBe(4);
       expect(result.truncated).toBe(false);
       expect(result.pageCount).toBe(2);
@@ -242,12 +245,12 @@ describe('AthenaQueryResultCollector', () => {
         rows: [{ i: 1 }, { i: 2 }],
         nextToken: 't',
         rowCount: 2,
-      } as PageResult<any>);
+      });
 
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2 });
       const result = await collector.collect(queryExecutionId);
 
-      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2]);
+      expect(result.rows.map((r: ParsedRow) => r.i)).toEqual([1, 2]);
       expect(result.truncated).toBe(true);
       expect(result.pageCount).toBe(1);
       expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
@@ -257,12 +260,12 @@ describe('AthenaQueryResultCollector', () => {
       mockFetchPageWith.mockResolvedValueOnce({
         rows: [{ i: 1 }, { i: 2 }, { i: 3 }],
         rowCount: 3,
-      } as PageResult<any>);
+      });
 
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2 });
       const result = await collector.collect(queryExecutionId);
 
-      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2]);
+      expect(result.rows.map((r: ParsedRow) => r.i)).toEqual([1, 2]);
       expect(result.truncated).toBe(true);
       expect(result.pageCount).toBe(1);
     });
@@ -271,10 +274,10 @@ describe('AthenaQueryResultCollector', () => {
       mockFetchPageWith.mockResolvedValueOnce({
         rows: [{ v: 1 }, { v: 2 }, { v: 3 }],
         rowCount: 3,
-      } as PageResult<any>);
+      });
 
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2 });
-      const yielded: any[] = [];
+      const yielded: ParsedRow[] = [];
       for await (const row of collector.stream(queryExecutionId, (r) => r)) {
         yielded.push(row);
       }
@@ -288,14 +291,14 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ a: 1 }, { a: 2 }],
           nextToken: 't',
           rowCount: 2,
-        } as PageResult<any>)
+        })
         .mockResolvedValueOnce({
           rows: [{ a: 3 }, { a: 4 }],
           rowCount: 2,
-        } as PageResult<any>);
+        });
 
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 3 });
-      const batches: any[][] = [];
+      const batches: ParsedRow[][] = [];
       const result = await collector.processBatches(
         queryExecutionId,
         (r) => r,
@@ -318,11 +321,11 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ n: 1 }],
           nextToken: 't',
           rowCount: 1,
-        } as PageResult<any>)
+        })
         .mockResolvedValueOnce({
           rows: [{ n: 2 }],
           rowCount: 1,
-        } as PageResult<any>);
+        });
 
       const onPage = jest.fn();
       const collector = new AthenaQueryResultCollector(mockClient, { onPage });
@@ -333,13 +336,13 @@ describe('AthenaQueryResultCollector', () => {
         1,
         expect.objectContaining({ rows: [{ n: 1 }], nextToken: 't' }),
         1,
-        false,
+        CollectionTruncation.NotTruncated,
       );
       expect(onPage).toHaveBeenNthCalledWith(
         2,
         expect.objectContaining({ rows: [{ n: 2 }] }),
         2,
-        false,
+        CollectionTruncation.NotTruncated,
       );
     });
 
@@ -349,7 +352,7 @@ describe('AthenaQueryResultCollector', () => {
         nextToken: 't',
         rowCount: 3,
       };
-      mockFetchPageWith.mockResolvedValueOnce(page as PageResult<any>);
+      mockFetchPageWith.mockResolvedValueOnce(page);
 
       const onPage = jest.fn();
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2, onPage });
@@ -368,7 +371,7 @@ describe('AthenaQueryResultCollector', () => {
           nextToken: 't',
         }),
         2,
-        true,
+        CollectionTruncation.Truncated,
       );
     });
 
@@ -376,7 +379,7 @@ describe('AthenaQueryResultCollector', () => {
       mockFetchPageWith.mockResolvedValueOnce({
         rows: [{ i: 1 }, { i: 2 }],
         rowCount: 2,
-      } as PageResult<any>);
+      });
 
       const onPage = jest.fn();
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2, onPage });
@@ -388,7 +391,7 @@ describe('AthenaQueryResultCollector', () => {
       expect(onPage).toHaveBeenCalledWith(
         expect.objectContaining({ rows: [{ i: 1 }, { i: 2 }], rowCount: 2 }),
         2,
-        false,
+        CollectionTruncation.NotTruncated,
       );
     });
 
@@ -398,30 +401,30 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ i: 1 }, { i: 2 }],
           nextToken: 't',
           rowCount: 2,
-        } as PageResult<any>)
+        })
         .mockResolvedValueOnce({
           rows: [{ i: 3 }, { i: 4 }],
           rowCount: 2,
-        } as PageResult<any>);
+        });
 
       const onPage = jest.fn();
       const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 3, onPage });
       const result = await collector.collect(queryExecutionId);
 
       expect(result.truncated).toBe(true);
-      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2, 3]);
+      expect(result.rows.map((r: ParsedRow) => r.i)).toEqual([1, 2, 3]);
       expect(onPage).toHaveBeenCalledTimes(2);
       expect(onPage).toHaveBeenNthCalledWith(
         1,
         expect.objectContaining({ rows: [{ i: 1 }, { i: 2 }], nextToken: 't' }),
         2,
-        false,
+        CollectionTruncation.NotTruncated,
       );
       expect(onPage).toHaveBeenNthCalledWith(
         2,
         expect.objectContaining({ rows: [{ i: 3 }], rowCount: 1 }),
         3,
-        true,
+        CollectionTruncation.Truncated,
       );
     });
   });
@@ -433,14 +436,14 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ id: 1 }, { id: 2 }],
           nextToken: 't',
           rowCount: 2,
-        } as PageResult<any>)
+        })
         .mockResolvedValueOnce({
           rows: [{ id: 3 }],
           rowCount: 1,
-        } as PageResult<any>);
+        });
 
       const collector = new AthenaQueryResultCollector(mockClient);
-      const out: any[] = [];
+      const out: ParsedRow[] = [];
       for await (const row of collector.stream(queryExecutionId, (r) => r)) {
         out.push(row);
       }
@@ -448,7 +451,7 @@ describe('AthenaQueryResultCollector', () => {
     });
 
     it('should call reset before stream execution', async () => {
-      mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 } as PageResult<any>);
+      mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 });
       const collector = new AthenaQueryResultCollector(mockClient);
       const gen = collector.stream(queryExecutionId, (r) => r);
       await gen.next();
@@ -463,14 +466,14 @@ describe('AthenaQueryResultCollector', () => {
           rows: [{ x: 'a' }],
           nextToken: 't',
           rowCount: 1,
-        } as PageResult<any>)
+        })
         .mockResolvedValueOnce({
           rows: [{ x: 'b' }, { x: 'c' }],
           rowCount: 2,
-        } as PageResult<any>);
+        });
 
       const collector = new AthenaQueryResultCollector(mockClient);
-      const batches: { pageIndex: number; rows: any[] }[] = [];
+      const batches: { pageIndex: number; rows: ParsedRow[] }[] = [];
       const result = await collector.processBatches(
         queryExecutionId,
         (r) => r,
@@ -488,7 +491,7 @@ describe('AthenaQueryResultCollector', () => {
     });
 
     it('should call reset before processBatches execution', async () => {
-      mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 } as PageResult<any>);
+      mockFetchPageWith.mockResolvedValueOnce({ rows: [], rowCount: 0 });
       const collector = new AthenaQueryResultCollector(mockClient);
       await collector.processBatches(queryExecutionId, (r) => r, () => {});
       expect(mockForExecution).toHaveBeenCalledWith(queryExecutionId);
