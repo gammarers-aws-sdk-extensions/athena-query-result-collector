@@ -12,7 +12,7 @@ import {
   AthenaQueryResultCollectorAbortError,
   AthenaQueryResultCollectorConcurrentUseError,
 } from './core/errors';
-import { isMaxRowsReached, remainingRowBudget } from './core/max-rows-predicates';
+import { isCollectionTruncated, isMaxRowsReached, remainingRowBudget } from './core/max-rows-predicates';
 import { hasMorePages } from './core/page-predicates';
 
 /**
@@ -42,10 +42,20 @@ export interface CollectorOptions extends PagerOptions {
    * Callback invoked after each page is fetched in {@link AthenaQueryResultCollector.collect}
    * and {@link AthenaQueryResultCollector.collectWith}.
    *
-   * @param page - The page just retrieved.
+   * Also runs for the page that reaches `maxRows`. On that page, `page.rows` contains only
+   * the rows kept under the cap, and `page.rowCount` matches that kept length. The fetched
+   * page object is not mutated.
+   *
+   * @param page - Page just retrieved. `rows` are the rows kept under `maxRows`.
    * @param totalCollected - Cumulative row count after appending this page (respecting `maxRows`).
+   * @param truncated - `true` when this page stopped collection with unread rows still remaining.
+   *   `false` on earlier pages and when the result set ends exactly at `maxRows`.
    */
-  onPage?: <T>(page: PageResult<T>, totalCollected: number) => void | Promise<void>;
+  onPage?: <T>(
+    page: PageResult<T>,
+    totalCollected: number,
+    truncated: boolean,
+  ) => void | Promise<void>;
   /**
    * Optional `AbortSignal` to cancel long-running collection, streaming, or batch processing.
    *
@@ -77,7 +87,11 @@ export interface CollectResult<T> {
   totalRows: number;
   /** Number of pages fetched from Athena before stopping. */
   pageCount: number;
-  /** `true` when collection stopped early because `maxRows` was reached. */
+  /**
+   * `true` when `maxRows` stopped collection while unread rows remained:
+   * rows were dropped from the last page, or that page still had a continuation token.
+   * `false` when the result set ended exactly at the cap, or when the cap was not reached.
+   */
   truncated: boolean;
 }
 
@@ -251,7 +265,8 @@ export class AthenaQueryResultCollector {
    * or call `forExecution(queryExecutionId)` on {@link AthenaQueryResultCollector.getPager}
    * and use `iterateRows` / `iteratePages` / `iteratePagesWith` on that handle.
    *
-   * Respects {@link CollectorOptions.maxRows}, invokes {@link CollectorOptions.onPage} after each page,
+   * Respects {@link CollectorOptions.maxRows}, invokes {@link CollectorOptions.onPage} after each page
+   * (including the page that reaches the cap, with only the kept rows),
    * and honors {@link CollectorOptions.signal} between pages.
    *
    * @typeParam T - Output type produced by `rowParser`.
@@ -285,8 +300,19 @@ export class AthenaQueryResultCollector {
 
         const remaining = remainingRowBudget(rows.length, this.options.maxRows);
         if (remaining !== undefined && page.rows.length >= remaining) {
-          rows.push(...page.rows.slice(0, remaining));
-          truncated = true;
+          const keptRows = page.rows.slice(0, remaining);
+          rows.push(...keptRows);
+          // Unread rows remain only when this page dropped rows or Athena has another page.
+          truncated = isCollectionTruncated(page.rows.length, remaining, page.nextToken);
+
+          if (this.options.onPage) {
+            this.throwIfAborted();
+            await this.options.onPage(
+              { ...page, rows: keptRows, rowCount: keptRows.length },
+              rows.length,
+              truncated,
+            );
+          }
           break;
         }
 
@@ -294,7 +320,7 @@ export class AthenaQueryResultCollector {
 
         if (this.options.onPage) {
           this.throwIfAborted();
-          await this.options.onPage(page, rows.length);
+          await this.options.onPage(page, rows.length, truncated);
         }
       }
 

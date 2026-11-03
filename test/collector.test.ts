@@ -216,6 +216,57 @@ describe('AthenaQueryResultCollector', () => {
       expect(result.pageCount).toBe(2);
     });
 
+    it('should set truncated to false when the last page ends exactly at maxRows', async () => {
+      mockFetchPageWith
+        .mockResolvedValueOnce({
+          rows: [{ i: 1 }, { i: 2 }],
+          nextToken: 't',
+          rowCount: 2,
+        } as PageResult<any>)
+        .mockResolvedValueOnce({
+          rows: [{ i: 3 }, { i: 4 }],
+          rowCount: 2,
+        } as PageResult<any>);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 4 });
+      const result = await collector.collect(queryExecutionId);
+
+      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2, 3, 4]);
+      expect(result.totalRows).toBe(4);
+      expect(result.truncated).toBe(false);
+      expect(result.pageCount).toBe(2);
+    });
+
+    it('should set truncated when maxRows is met and a continuation token remains', async () => {
+      mockFetchPageWith.mockResolvedValueOnce({
+        rows: [{ i: 1 }, { i: 2 }],
+        nextToken: 't',
+        rowCount: 2,
+      } as PageResult<any>);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2 });
+      const result = await collector.collect(queryExecutionId);
+
+      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2]);
+      expect(result.truncated).toBe(true);
+      expect(result.pageCount).toBe(1);
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+    });
+
+    it('should set truncated when the page is longer than the remaining budget and has no continuation token', async () => {
+      mockFetchPageWith.mockResolvedValueOnce({
+        rows: [{ i: 1 }, { i: 2 }, { i: 3 }],
+        rowCount: 3,
+      } as PageResult<any>);
+
+      const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2 });
+      const result = await collector.collect(queryExecutionId);
+
+      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2]);
+      expect(result.truncated).toBe(true);
+      expect(result.pageCount).toBe(1);
+    });
+
     it('should stop yielding when maxRows is exceeded in stream', async () => {
       mockFetchPageWith.mockResolvedValueOnce({
         rows: [{ v: 1 }, { v: 2 }, { v: 3 }],
@@ -282,11 +333,95 @@ describe('AthenaQueryResultCollector', () => {
         1,
         expect.objectContaining({ rows: [{ n: 1 }], nextToken: 't' }),
         1,
+        false,
       );
       expect(onPage).toHaveBeenNthCalledWith(
         2,
         expect.objectContaining({ rows: [{ n: 2 }] }),
         2,
+        false,
+      );
+    });
+
+    it('should invoke onPage with kept rows when the first page reaches maxRows', async () => {
+      const page = {
+        rows: [{ i: 1 }, { i: 2 }, { i: 3 }],
+        nextToken: 't',
+        rowCount: 3,
+      };
+      mockFetchPageWith.mockResolvedValueOnce(page as PageResult<any>);
+
+      const onPage = jest.fn();
+      const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2, onPage });
+      const result = await collector.collect(queryExecutionId);
+
+      expect(result.rows).toEqual([{ i: 1 }, { i: 2 }]);
+      expect(result.truncated).toBe(true);
+      expect(result.pageCount).toBe(1);
+      expect(mockFetchPageWith).toHaveBeenCalledTimes(1);
+      expect(page.rows).toHaveLength(3);
+      expect(onPage).toHaveBeenCalledTimes(1);
+      expect(onPage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          rows: [{ i: 1 }, { i: 2 }],
+          rowCount: 2,
+          nextToken: 't',
+        }),
+        2,
+        true,
+      );
+    });
+
+    it('should invoke onPage with truncated false when the page ends exactly at maxRows', async () => {
+      mockFetchPageWith.mockResolvedValueOnce({
+        rows: [{ i: 1 }, { i: 2 }],
+        rowCount: 2,
+      } as PageResult<any>);
+
+      const onPage = jest.fn();
+      const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 2, onPage });
+      const result = await collector.collect(queryExecutionId);
+
+      expect(result.truncated).toBe(false);
+      expect(result.rows).toEqual([{ i: 1 }, { i: 2 }]);
+      expect(onPage).toHaveBeenCalledTimes(1);
+      expect(onPage).toHaveBeenCalledWith(
+        expect.objectContaining({ rows: [{ i: 1 }, { i: 2 }], rowCount: 2 }),
+        2,
+        false,
+      );
+    });
+
+    it('should invoke onPage for the page that reaches maxRows after an earlier page', async () => {
+      mockFetchPageWith
+        .mockResolvedValueOnce({
+          rows: [{ i: 1 }, { i: 2 }],
+          nextToken: 't',
+          rowCount: 2,
+        } as PageResult<any>)
+        .mockResolvedValueOnce({
+          rows: [{ i: 3 }, { i: 4 }],
+          rowCount: 2,
+        } as PageResult<any>);
+
+      const onPage = jest.fn();
+      const collector = new AthenaQueryResultCollector(mockClient, { maxRows: 3, onPage });
+      const result = await collector.collect(queryExecutionId);
+
+      expect(result.truncated).toBe(true);
+      expect(result.rows.map((r: any) => r.i)).toEqual([1, 2, 3]);
+      expect(onPage).toHaveBeenCalledTimes(2);
+      expect(onPage).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ rows: [{ i: 1 }, { i: 2 }], nextToken: 't' }),
+        2,
+        false,
+      );
+      expect(onPage).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ rows: [{ i: 3 }], rowCount: 1 }),
+        3,
+        true,
       );
     });
   });

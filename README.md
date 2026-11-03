@@ -67,7 +67,7 @@ const result = await collector.collect('query-execution-id');
 console.log(result.rows);       // ParsedRow[]
 console.log(result.totalRows);
 console.log(result.pageCount);
-console.log(result.truncated);  // true if limited by maxRows
+console.log(result.truncated);  // true when rows remain past maxRows
 ```
 
 ### Collection with a custom parser
@@ -257,7 +257,7 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 | Option | Type | Description |
 | --- | --- | --- |
 | `maxRows` | `number` | Cumulative row limit **across all pages** for `collect()` / `stream()` / `processBatches()` (unlimited if omitted). Distinct from pager/parser `maxRows`, which caps rows inside a single Athena `ResultSet` (one page) |
-| `onPage` | `function` | Callback after each fetched page in `collect()` / `collectWith()`; receives the page and cumulative row count |
+| `onPage` | `function` | Callback after each fetched page in `collect()` / `collectWith()`, including the page that reaches `maxRows`. Arguments are the page (`rows` are the rows kept under the cap), the cumulative row count, and whether unread rows remain |
 | `signal` | `AbortSignal` | Cancel collection/streaming/batch loops and pending page-fetch waits (throws `AthenaQueryResultCollectorAbortError` with `name === 'AbortError'`) |
 
 ### Pager options (forwarded)
