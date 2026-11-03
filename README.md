@@ -14,7 +14,7 @@ It supports full collection, streaming, and page-based batch processing, and it 
 - Stream rows lazily with `stream()` as an `AsyncGenerator`
 - Process rows per page with `processBatches()` without buffering the full result set
 - Cap output with collector `maxRows` (cumulative across pages; distinct from pager/parser `maxRows` on one `ResultSet`)
-- Report progress with `onPage` during `collect()` / `collectWith()`
+- Report progress with `onPage` during `collect()` / `collectWith()`, including `CollectionTruncation` when unread rows remain
 - Forward pager settings (`maxResults`, `queryResultType`, `parseResultSetOptions`) while keeping collector-only options separate
 - Cancel long-running work with `AbortSignal` (`CollectorOptions.signal`)
 - Rely on the injected `AthenaClient` for transient `GetQueryResults` retries (for example `maxAttempts`)
@@ -70,6 +70,29 @@ console.log(result.pageCount);
 console.log(result.truncated);  // true when rows remain past maxRows
 ```
 
+### Progress (`onPage`)
+
+`onPage` runs after every page kept by `collect()` / `collectWith()`, including the page that reaches `maxRows`. `page.rows` are the rows kept under the cap. `truncation` is `CollectionTruncation.Truncated` when unread rows remain, and `CollectionTruncation.NotTruncated` when the page does not leave unread rows.
+
+```typescript
+import {
+  AthenaQueryResultCollector,
+  CollectionTruncation,
+} from 'athena-query-result-collector';
+
+const collector = new AthenaQueryResultCollector(client, {
+  maxRows: 1000,
+  onPage: (page, totalCollected, truncation) => {
+    console.log(page.rows.length, totalCollected, truncation);
+    if (truncation === CollectionTruncation.Truncated) {
+      console.log('unread rows remain');
+    }
+  },
+});
+
+await collector.collect('query-execution-id');
+```
+
 ### Collection with a custom parser
 
 `collectWith()` also builds a full in-memory `rows` array. Prefer streaming or batch processing for large results.
@@ -109,7 +132,7 @@ await collector.processBatches(
 | `collect()` / `collectWith()` | Accumulates **all** rows into one array; large results can **OOM** | Small-to-moderate results that must fit in memory, or when you need aggregated metadata (`totalRows`, `pageCount`, `truncated`) |
 | `stream()` | Yields one row at a time; only the current page is retained | Large result sets consumed row-by-row |
 | `processBatches()` | Passes one page at a time; does not accumulate all rows | Large result sets written or forwarded in page-sized chunks |
-| `getPager().forExecution(id).iterateRows()` / `iteratePages()` / `iteratePagesWith()` | Same paging model as the pager; collector options are **not** applied | Lower-level control without collector `maxRows` / `signal` |
+| `getPager().forExecution(id).iterateRows()` / `iteratePages()` / `iteratePagesWith()` | Same paging model as the pager; collector options are **not** applied | Lower-level control without collector `maxRows` / `onPage` / `signal` |
 
 ### Concurrency
 
@@ -256,8 +279,8 @@ Only pager fields are forwarded to the internal `AthenaQueryResultPager` instanc
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `maxRows` | `number` | Cumulative row limit **across all pages** for `collect()` / `stream()` / `processBatches()` (unlimited if omitted). Distinct from pager/parser `maxRows`, which caps rows inside a single Athena `ResultSet` (one page) |
-| `onPage` | `function` | Callback after each fetched page in `collect()` / `collectWith()`, including the page that reaches `maxRows`. Arguments are the page (`rows` are the rows kept under the cap), the cumulative row count, and `CollectionTruncation` (`Truncated` when unread rows remain, `NotTruncated` otherwise) |
+| `maxRows` | `number` | Cumulative row limit **across all pages** for `collect()` / `collectWith()` / `stream()` / `processBatches()` (unlimited if omitted). Distinct from pager/parser `maxRows`, which caps rows inside a single Athena `ResultSet` (one page) |
+| `onPage` | `(page: PageResult<T>, totalCollected: number, truncation: CollectionTruncation) => void \| Promise<void>` | Called after each fetched page in `collect()` / `collectWith()`, including the page that reaches `maxRows`. `page.rows` are the rows kept under the cap. `truncation` is `CollectionTruncation.Truncated` when unread rows remain, and `CollectionTruncation.NotTruncated` otherwise |
 | `signal` | `AbortSignal` | Cancel collection/streaming/batch loops and pending page-fetch waits (throws `AthenaQueryResultCollectorAbortError` with `name === 'AbortError'`) |
 
 ### Pager options (forwarded)

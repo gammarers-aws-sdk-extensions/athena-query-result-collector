@@ -43,7 +43,8 @@ export interface CollectorOptions extends PagerOptions {
    * Maximum number of rows to collect or process across **all pages**.
    *
    * This is a collector-level cumulative cap for {@link AthenaQueryResultCollector.collect},
-   * {@link AthenaQueryResultCollector.stream}, and {@link AthenaQueryResultCollector.processBatches}.
+   * {@link AthenaQueryResultCollector.collectWith}, {@link AthenaQueryResultCollector.stream},
+   * and {@link AthenaQueryResultCollector.processBatches}.
    * It is **not** the pager/parser `maxRows` option, which limits rows inside a single Athena
    * `ResultSet` (one page).
    *
@@ -145,6 +146,8 @@ export class AthenaQueryResultCollector {
   private activeOperation?: 'collect' | 'stream' | 'processBatches';
 
   /**
+   * Creates a collector bound to `client` and optional {@link CollectorOptions}.
+   *
    * @param client - AWS SDK v3 `AthenaClient` used to fetch query results.
    * @param options - Collection limits, pager settings, and optional abort signal.
    * @throws {AthenaQueryResultPagerInvalidMaxResultsError} When `maxResults` is not an integer in `1..1000`.
@@ -161,6 +164,7 @@ export class AthenaQueryResultCollector {
    * Collector-specific options (`maxRows`, `onPage`, `signal`) are not forwarded.
    *
    * @param options - Full collector options from the constructor.
+   * @returns Pager options with collector-only fields omitted.
    */
   private toPagerOptions(options: CollectorOptions): PagerOptions {
     const pagerOptions: PagerOptions = {};
@@ -513,6 +517,7 @@ export class AthenaQueryResultCollector {
    * checks across Jest VM realms.
    *
    * @param error - Rejected or thrown value.
+   * @returns `true` when `error` is an object whose `name` is `'AbortError'`.
    */
   private isAbortError(error: unknown): boolean {
     if (typeof error !== 'object' || error === null) {
@@ -565,6 +570,7 @@ export class AthenaQueryResultCollector {
    * Derives a human-readable message from a non-`Error` rejection value.
    *
    * @param error - Rejected value that is not an `Error` instance.
+   * @returns A message derived from `error`, or `'Unknown error'` when `error` is `undefined`.
    */
   private extractErrorMessage(error: unknown): string {
     if (typeof error === 'string') {
